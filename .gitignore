@@ -1,0 +1,16 @@
+.task
+bin
+frontend/dist
+!frontend/dist/
+frontend/dist/*
+!frontend/dist/.gitkeep
+frontend/node_modules
+.env
+.env.local
+artifacts
+workspaces
+*.db
+*.db-shm
+*.db-wal
+build/linux/appimage/build
+build/windows/nsis/MicrosoftEdgeWebview2Setup.exe

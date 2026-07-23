@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MsixPackagingToolTemplate
+    xmlns="http://schemas.microsoft.com/msix/packaging/msixpackagingtool/template/2022">
+    <Settings
+        AllowTelemetry="false"
+        ApplyACLsToPackageFiles="true"
+        GenerateCommandLineFile="true"
+        AllowPromptForPassword="false">
+    </Settings>
+    <Installer
+        Path="CTF-BTFly.exe"
+        Arguments=""
+        InstallLocation="C:\Program Files\CTF-BTFly\CTF-BTFly">
+    </Installer>
+    <PackageInformation
+        PackageName="CTF-BTFly"
+        PackageDisplayName="CTF-BTFly"
+        PublisherName="CN=CTF-BTFly"
+        PublisherDisplayName="CTF-BTFly"
+        Version="0.1.0.0"
+        PackageDescription="CTF-BTFly · CTF autonomous solving workbench">
+        <Capabilities>
+            <Capability Name="runFullTrust" />
+            
+        </Capabilities>
+        <Applications>
+            <Application
+                Id="io.ctfbtfly.workbench"
+                Description="CTF-BTFly · CTF autonomous solving workbench"
+                DisplayName="CTF-BTFly"
+                ExecutableName="CTF-BTFly.exe"
+                EntryPoint="Windows.FullTrustApplication">
+                
+            </Application>
+        </Applications>
+        <Resources>
+            <Resource Language="en-us" />
+        </Resources>
+        <Dependencies>
+            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+        </Dependencies>
+        <Properties>
+            <Framework>false</Framework>
+            <DisplayName>CTF-BTFly</DisplayName>
+            <PublisherDisplayName>CTF-BTFly</PublisherDisplayName>
+            <Description>CTF-BTFly · CTF autonomous solving workbench</Description>
+            <Logo>Assets\AppIcon.png</Logo>
+        </Properties>
+    </PackageInformation>
+    <SaveLocation PackagePath="CTF-BTFly.msix" />
+    <PackageIntegrity>
+        <CertificatePath></CertificatePath>
+    </PackageIntegrity>
+</MsixPackagingToolTemplate>

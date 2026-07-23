@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "CTF-BTFly",
+			"FileDescription": "CTF-BTFly · CTF autonomous solving workbench",
+			"LegalCopyright": "© 2026, CTF-BTFly",
+			"ProductName": "CTF-BTFly",
+			"Comments": "CTF autonomous solving workbench"
+		}
+	}
+}

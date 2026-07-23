@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--cpi-text);
+  background: var(--cpi-canvas);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  color-scheme: dark;
+  --cpi-canvas: #080c11;
+  --cpi-header: #0b1016;
+  --cpi-sidebar: #0a0f15;
+  --cpi-panel: #0d131b;
+  --cpi-panel-raised: #0d141c;
+  --cpi-panel-strong: #111923;
+  --cpi-input: #090e14;
+  --cpi-border: #1e2937;
+  --cpi-text: #dce5ee;
+  --cpi-muted: #64748b;
+  --cpi-grid: rgba(54, 191, 250, .025);
+  --cpi-scroll: #263241;
+  --cpi-scroll-hover: #3a495b;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --cpi-canvas: #f8fafc;
+  --cpi-header: #ffffff;
+  --cpi-sidebar: #f1f5f9;
+  --cpi-panel: #ffffff;
+  --cpi-panel-raised: #ffffff;
+  --cpi-panel-strong: #ffffff;
+  --cpi-input: #ffffff;
+  --cpi-border: #cbd5e1;
+  --cpi-text: #0f172a;
+  --cpi-muted: #64748b;
+  --cpi-grid: rgba(2, 132, 199, .055);
+  --cpi-scroll: #cbd5e1;
+  --cpi-scroll-hover: #94a3b8;
+  --color-slate-50: #0f172a;
+  --color-slate-100: #172033;
+  --color-slate-200: #1e293b;
+  --color-slate-300: #334155;
+  --color-slate-400: #475569;
+  --color-slate-500: #64748b;
+  --color-slate-600: #94a3b8;
+  --color-slate-700: #cbd5e1;
+  --color-slate-800: #e2e8f0;
+  --color-slate-900: #f8fafc;
+  --color-slate-950: #ffffff;
+  --color-sky-300: #0369a1;
+  --color-emerald-300: #047857;
+  --color-amber-300: #b45309;
+  --color-violet-300: #6d28d9;
+  --color-red-300: #b91c1c;
+  --color-fuchsia-300: #a21caf;
+}
+
+:root[data-theme="vscode"] {
+  --cpi-canvas: #1e1e1e; --cpi-header: #181818; --cpi-sidebar: #181818; --cpi-panel: #252526; --cpi-panel-raised: #202020; --cpi-panel-strong: #2d2d30; --cpi-input: #1e1e1e; --cpi-border: #3c3c3c; --cpi-text: #d4d4d4; --cpi-muted: #858585; --cpi-grid: rgba(0, 122, 204, .035); --cpi-scroll: #424242; --cpi-scroll-hover: #5a5a5a;
+  --color-slate-200: #d4d4d4; --color-slate-300: #b9b9b9; --color-slate-400: #9d9d9d; --color-slate-500: #858585; --color-slate-600: #6d6d6d; --color-slate-700: #4a4a4a; --color-slate-800: #333333; --color-slate-900: #252526;
+}
+
+:root[data-theme="one-dark"] {
+  --cpi-canvas: #282c34; --cpi-header: #21252b; --cpi-sidebar: #21252b; --cpi-panel: #2c313a; --cpi-panel-raised: #2c313a; --cpi-panel-strong: #353b45; --cpi-input: #1e2127; --cpi-border: #3e4451; --cpi-text: #abb2bf; --cpi-muted: #7f848e; --cpi-grid: rgba(97, 175, 239, .035); --cpi-scroll: #454c59; --cpi-scroll-hover: #5c6370;
+  --color-slate-200: #abb2bf; --color-slate-300: #9da5b4; --color-slate-400: #828997; --color-slate-500: #6f7784; --color-slate-600: #5c6370; --color-slate-700: #4b5263; --color-slate-800: #363b45; --color-slate-900: #282c34;
+}
+
+:root[data-theme="dracula"] {
+  --cpi-canvas: #282a36; --cpi-header: #21222c; --cpi-sidebar: #21222c; --cpi-panel: #303241; --cpi-panel-raised: #303241; --cpi-panel-strong: #383a4a; --cpi-input: #1f2029; --cpi-border: #44475a; --cpi-text: #f8f8f2; --cpi-muted: #a8a8b5; --cpi-grid: rgba(189, 147, 249, .045); --cpi-scroll: #4d5065; --cpi-scroll-hover: #6272a4;
+  --color-slate-200: #f8f8f2; --color-slate-300: #dedee2; --color-slate-400: #c1c1cb; --color-slate-500: #a8a8b5; --color-slate-600: #737586; --color-slate-700: #56586b; --color-slate-800: #44475a; --color-slate-900: #303241;
+}
+
+:root[data-theme="nord"] {
+  --cpi-canvas: #2e3440; --cpi-header: #272c36; --cpi-sidebar: #272c36; --cpi-panel: #3b4252; --cpi-panel-raised: #3b4252; --cpi-panel-strong: #434c5e; --cpi-input: #2e3440; --cpi-border: #4c566a; --cpi-text: #eceff4; --cpi-muted: #9ba6b9; --cpi-grid: rgba(136, 192, 208, .04); --cpi-scroll: #4c566a; --cpi-scroll-hover: #5e81ac;
+  --color-slate-200: #eceff4; --color-slate-300: #d8dee9; --color-slate-400: #b9c3d1; --color-slate-500: #9ba6b9; --color-slate-600: #758196; --color-slate-700: #586276; --color-slate-800: #434c5e; --color-slate-900: #3b4252;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--cpi-canvas); color: var(--cpi-text); }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-corner { background: var(--cpi-panel-raised); }
+::-webkit-scrollbar-thumb { background: var(--cpi-scroll); border: 3px solid transparent; border-radius: 999px; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--cpi-scroll-hover); }
+.mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.brand-wordmark { display: flex; align-items: baseline; width: max-content; color: var(--cpi-text); font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif; font-size: 18px; font-style: italic; font-weight: 700; letter-spacing: -.035em; line-height: 1; white-space: nowrap; }
+.brand-prefix { letter-spacing: .025em; }
+.brand-name { margin-left: 1px; }
+.panel-grid { background-image: linear-gradient(var(--cpi-grid) 1px, transparent 1px), linear-gradient(90deg, var(--cpi-grid) 1px, transparent 1px); background-size: 24px 24px; }
+.status-pulse { box-shadow: 0 0 0 0 rgba(50,213,131,.4); animation: pulse 2.2s infinite; }
+@keyframes pulse { 70% { box-shadow: 0 0 0 7px rgba(50,213,131,0); } 100% { box-shadow: 0 0 0 0 rgba(50,213,131,0); } }
+
+/* The workspace started with a few carefully tuned arbitrary Tailwind surface
+   colours. These theme-aware overrides keep the component markup compact
+   while ensuring all major app surfaces switch together. */
+:root[data-theme] [class*="bg-[#080c11]"] { background-color: var(--cpi-canvas) !important; }
+:root[data-theme] [class*="bg-[#0b1016]"] { background-color: var(--cpi-header) !important; }
+:root[data-theme] [class*="bg-[#0a0f15]"] { background-color: var(--cpi-sidebar) !important; }
+:root[data-theme] [class*="bg-[#0c1219]"] { background-color: var(--cpi-panel-raised) !important; }
+:root[data-theme] [class*="bg-[#0d131b]"] { background-color: var(--cpi-panel) !important; }
+:root[data-theme] [class*="bg-[#0d141c]"] { background-color: var(--cpi-panel-raised) !important; }
+:root[data-theme] [class*="bg-[#0e151e]"] { background-color: var(--cpi-panel-strong) !important; }
+:root[data-theme] [class*="bg-[#090e14]"] { background-color: var(--cpi-input) !important; }
+:root[data-theme] [class*="bg-[#101720]"], :root[data-theme] [class*="bg-[#111923]"], :root[data-theme] [class*="bg-[#121b25]"] { background-color: var(--cpi-panel-strong) !important; }
+:root[data-theme] [class*="border-slate-800"] { border-color: var(--cpi-border) !important; }
+:root[data-theme] [class*="divide-slate-800"] > :not(:last-child) { border-color: var(--cpi-border) !important; }
+:root[data-theme] ::selection { background: color-mix(in srgb, var(--cpi-grid) 300%, transparent); }
