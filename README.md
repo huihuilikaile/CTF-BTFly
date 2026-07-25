@@ -1,125 +1,330 @@
-# CTF-BTFly
+<div align="center">
+  <img src="./frontend/public/cpi-icon.png" width="96" alt="CTF-BTFly Logo" />
+  <h1>CTF-BTFly</h1>
+  <p><strong>自动化 CTF 解题工作台</strong></p>
+  <p>
+    将桌面工作台、独立 Go 控制平面、Docker 隔离沙箱、Pi Agent 与模型网关组合在一起，<br />
+    为每道 CTF 题目提供可观察、可复现、可人工接管的自主分析环境。
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26" />
+    <img src="https://img.shields.io/badge/Wails-v3-EA4AAA" alt="Wails v3" />
+    <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&amp;logoColor=111827" alt="React 19" />
+    <img src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&amp;logoColor=white" alt="TypeScript 7" />
+    <img src="https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&amp;logoColor=white" alt="Docker Sandbox" />
+    <img src="https://img.shields.io/badge/SQLite-Local--first-003B57?logo=sqlite&amp;logoColor=white" alt="SQLite Local-first" />
+  </p>
+</div>
+
 图文说明:
 https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g
 
-本地优先的自主 CTF 解题工作台。
+> [!CAUTION]
+> CTF-BTFly 只能用于明确授权的 CTF 题目、靶场和安全研究环境。  
+> 请勿使用本项目扫描、测试或攻击未授权目标，也不要把比赛附件、Flag、凭据或私有数据上传到第三方服务。
 
-```text
-Wails v3 + React 19 + Tailwind CSS 4
-                │ REST / WebSocket
-        Independent Go 1.26 daemon
-      SQLite · Docker SDK · model gateway
-                │ Docker attach JSONL
-        Pi Agent RPC sandbox per task
+## 目录
+
+- [项目简介](#项目简介)
+- [核心能力](#核心能力)
+- [系统架构](#系统架构)
+- [快速开始](#快速开始)
+- [模型网关配置](#模型网关配置)
+- [使用流程](#使用流程)
+- [沙箱与安全模型](#沙箱与安全模型)
+- [题型与专项镜像](#题型与专项镜像)
+- [项目结构](#项目结构)
+- [开发与验证](#开发与验证)
+- [当前限制](#当前限制)
+
+## 项目简介
+
+CTF-BTFly 将 GUI 与高权限控制平面分离：
+
+- **Wails + React 桌面端**负责题目管理、状态展示、事件时间线、文件预览、Writeup 和模型用量；
+- **独立 Go daemon**负责 SQLite、Docker、任务状态机、模型凭据和 Agent 生命周期；
+- **每题一个 Docker 沙箱**，根据题型加载 Web、Crypto、Pwn、Reverse、Forensics 或 Misc 专项工具；
+- **Pi RPC Agent**在容器内自主分析附件、执行命令、编写脚本并生成中文 `WRITEUP.md`；
+- **本地模型网关**把题目级短期 Token 替换为真实上游 Key，真实密钥不会进入容器或前端。
+
+任务事件会先写入 SQLite，再通过 WebSocket 实时推送。前端断线或切换页面后，可以根据单调递增的 `sequence` 补齐历史。
+
+## 核心能力
+
+| 能力             | 说明                                                       |
+| ---------------- | ---------------------------------------------------------- |
+| 本地桌面工作台   | 创建题目、分类筛选、实时状态、主题切换、右键清理           |
+| 独立控制平面     | GUI 退出或隐藏后，daemon 可继续管理正在运行的任务          |
+| 一题一沙箱       | 每道题拥有独立容器、工作区、Agent 会话和短期模型 Token     |
+| 六类专项镜像     | Web、Crypto、Pwn、Reverse、Forensics、Misc                 |
+| 实时事件流       | Agent 消息、工具调用、stderr、沙箱状态和 Flag 候选统一记录 |
+| 断线重放         | SQLite 持久事件与 WebSocket 实时事件按序号合并             |
+| 附件与 Artifact  | 支持文件/文件夹上传、工作区浏览、文本预览和原文件下载      |
+| 强制中文 Writeup | Agent 必须生成可复现的 `WRITEUP.md` 和关键分析产物         |
+| Flag 提取        | 只从 `## 最终 Flag` 章节的代码块提取已验证结果             |
+| 暂停与恢复       | 保留原容器、Pi 会话和工作区，继续同一次解题上下文          |
+| 模型用量账本     | 记录请求数、输入/输出/缓存/推理 Token 和按题目/日期聚合    |
+| 受控专项交接     | 当前支持根 Misc 任务向隔离 Crypto 子任务交接密码学问题     |
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    UI["CTF-BTFly.exe<br/>Wails v3 + React 19"] -->|"REST / WebSocket"| Daemon["ctfagent-daemon<br/>Go Control Plane"]
+    Daemon --> Store["SQLite<br/>任务 · 事件 · 模型用量"]
+    Daemon --> Docker["Docker Engine"]
+    Docker --> Sandbox["题型专项 Pi 沙箱"]
+    Sandbox --> Workspace["/workspace<br/>附件 · Artifact · Writeup"]
+    Sandbox -->|"题目级短期 Token"| Gateway["本地模型网关"]
+    Gateway -->|"真实 API Key"| Model["OpenAI-compatible API"]
+    Daemon -->|"事件重放 / 实时推送"| UI
 ```
 
-GUI 只负责操作、日志与工作台；独立 daemon 持有 Docker 权限、SQLite、短期模型凭证和 Pi 会话。每个题目都会创建一个新的容器实例，容器完成后可保留作人工接管或由 daemon 销毁。
+任务执行链：
 
-## 已实现
+```text
+创建题目并上传附件
+  → daemon 创建独立工作区
+  → 根据题型选择专项镜像
+  → 创建 Docker 容器并启动 Pi RPC
+  → Agent 分析附件、执行工具、保存 Artifact
+  → JSONL 事件写入 SQLite 并推送到 GUI
+  → 生成中文 WRITEUP.md
+  → 提取最终 Flag 或保留失败证据供人工接管
+```
 
-- Wails v3 桌面工作台：任务创建、系统状态、实时事件时间线、Flag 候选、Sandbox 信息；
-- 独立 Go daemon：本地 REST/WebSocket、任务鉴权、SQLite 事件日志和断线重放；
-- Docker SDK：按题型选择 Pi 镜像、资源限额、`SYS_PTRACE` 仅给 Pwn、`gVisor → runc` / `Kata → runc` 运行时探测回退；
-- Pi RPC：JSONL stdin/stdout，标准化 Agent/工具/错误事件；
-- 模型网关：真实 API Key 留在 daemon，容器只获得任务级临时 token；按题目持久化输入、输出与总 Token，并展示模型名称与按日期统计；
-- 专项 Pi 镜像：Web、Crypto、Pwn、Reverse、Forensics、Misc；
-- Artifact 工作目录：每道题独立挂载到容器 `/workspace`。
+## 快速开始
 
-## 前置条件
+### 1. 环境要求
 
-- Go 1.26（项目会使用 Go toolchain 自动下载）；
+- Go 1.26；
 - Node.js 24+ 与 npm；
-- Docker Desktop / Docker Engine；
+- Docker Desktop 或 Docker Engine；
 - Wails v3 CLI；
-- 可用的 OpenAI-compatible 模型接口。
+- 可用的 OpenAI-compatible 模型接口；
+- Windows 为当前主要开发和验证平台。
 
-Windows 开发环境可直接使用 Docker Desktop。当前 Docker Desktop 未安装 `runsc`/Kata 时，daemon 会明确显示 `runc` 开发回退警告；线上或处理不可信二进制时，应使用 Linux Worker 上的 gVisor（普通题）或 Kata/VM（Pwn）。
+线上处理不可信题目时，建议在 Linux Worker 上使用：
 
-## 配置模型网关
+- 普通题：gVisor / `runsc`；
+- Pwn：Kata Containers 或独立虚拟机。
 
-daemon 会自动读取与 `CTF-BTFly.exe` 同目录的 `.env` 中的真实密钥；不要把它放进 Docker 镜像、题目工作目录或前端代码。发布版默认位置为 `bin\\.env`。也可以用 `CTF_AGENT_ENV_FILE` 指定一个绝对路径。
-
-请在 `CTF-BTFly.exe` 所在目录创建被 Git 忽略的 `.env`。填写以下三项后，完全退出并重启 GUI（它会重新启动 daemon）：
+### 2. 安装前端依赖
 
 ```powershell
+cd frontend
+npm ci
+cd ..
+```
+
+### 3. 配置模型网关
+
+在最终 `CTF-BTFly.exe` 所在目录创建 `.env`。开发构建默认产物位于 `bin/`，因此通常创建 `bin/.env`：
+
+```env
 CTF_UPSTREAM_MODEL_BASE_URL=https://your-openai-compatible-endpoint/v1
 CTF_UPSTREAM_MODEL_API_KEY=your-real-provider-key
 CTF_MODEL_ID=your-model-id
-# 可选：默认 true。若上游 OpenAI 兼容服务拒绝 stream_options，可设为 false。
 CTF_MODEL_INCLUDE_STREAM_USAGE=true
 ```
 
-系统环境变量仍优先于 `.env`，适合 CI 或临时覆盖配置。
+> [!IMPORTANT]
+> `.env` 包含真实模型密钥，不要提交到 Git、复制进 Docker 镜像或放入题目工作区。
 
-可选变量：
-
-```text
-CTF_AGENT_DATA_DIR    # 可选：覆盖默认数据目录；默认在 CTF-BTFly.exe 同目录的 data/ 文件夹
-CTF_DAEMON_ADDRESS    # 默认 127.0.0.1:17321
-CTF_DAEMON_TOKEN      # 默认启动时安全生成并保存在本地
-CTF_MODEL_INCLUDE_STREAM_USAGE # 默认 true；请求上游在流式结束时返回 usage
-```
-
-daemon 会为每个任务签发短期 token，容器通过 `http://host.docker.internal:<port>/model` 访问模型网关。真实 Provider Key 不会进入 Pi 容器。模型网关只保存请求归属、模型名、Token 数、响应状态与耗时；不会保存 Prompt、模型回复或密钥。
-
-## 模型用量
-
-“模型用量”页会显示总输入、输出、总 Token、请求数、最近 30 天的用量柱状图，以及每道题使用的模型和 Token 汇总。Misc → Crypto 专项交接产生的子任务用量会归并至原题。
-
-Token 数据从上游模型响应的 `usage` 字段获得。对于标准 OpenAI 兼容流式接口，CTF-BTFly 默认自动补充 `stream_options.include_usage=true`。旧任务不会补算；只有新版本 daemon 启动后的模型请求会写入本地 SQLite 账本。若上游不提供 `usage`，CTF-BTFly 仅记录请求次数而不会猜测 Token。
-
-## 构建与启动
-
-在项目根目录执行：
+### 4. 构建专项镜像
 
 ```powershell
-# 1. 构建 Pi 专项镜像（首次或 Dockerfile 修改后）
-./images/build.ps1 -Version 0.1.0
+.\images\build.ps1 -Version 0.1.0
+```
 
-# 2. 构建独立控制平面
+首次构建需要下载 Node、Python、Debian 软件包和各题型工具，耗时取决于网络与 Docker 缓存。
+
+### 5. 启动开发环境
+
+```powershell
+# 构建独立 daemon
 wails3 task daemon:build
 
-# 3. 开发模式（会先构建 daemon）
+# 启动 Wails + Vite 开发环境
 wails3 task dev
-
-# 或构建桌面程序
-wails3 build
 ```
 
-产物：
-
-```text
-bin/CTF-BTFly.exe          # Wails GUI
-bin/ctfagent-daemon.exe   # 独立 Control Plane
-```
-
-GUI 启动时会连接已有 daemon；若没有运行，则自动启动同目录的 `ctfagent-daemon.exe`。也可以直接运行：
+也可以单独运行控制平面：
 
 ```powershell
 wails3 task daemon:run
 ```
 
-## 镜像与权限模型
-
-| 题型      | 镜像                           | 容器内权限          | 目标运行时  |
-| --------- | ------------------------------ | ------------------- | ----------- |
-| Web       | `ctf-agent-pi-web:0.1.0`       | root in sandbox     | gVisor      |
-| Crypto    | `ctf-agent-pi-crypto:0.1.0`    | root in sandbox     | gVisor      |
-| Reverse   | `ctf-agent-pi-reverse:0.1.0`   | root in sandbox     | gVisor/Kata |
-| Pwn       | `ctf-agent-pi-pwn:0.1.0`       | root + `SYS_PTRACE` | Kata/VM     |
-| Forensics | `ctf-agent-pi-forensics:0.1.0` | root in sandbox     | gVisor/Kata |
-| Misc      | `ctf-agent-pi-misc:0.1.0`      | root in sandbox     | gVisor      |
-
-Agent 在沙箱内可以自由执行命令、写脚本和安装工具；但平台不会提供 `--privileged`、Docker Socket、宿主机目录、长期 API Key 或任意宿主机密钥。网络白名单/egress proxy 是下一阶段部署到 Linux Worker 时必须启用的边界。
-
-## 验证
+### 6. 构建桌面程序
 
 ```powershell
-go test ./...
-cd frontend; npm run build
 wails3 build
 ```
 
-当前自动化验证覆盖 SQLite 的单调事件序列与重放、模型网关短期 token 替换与 Token 用量解析、题目/子任务用量汇总、HTTP 创建任务/鉴权/事件回放、Pi 事件标准化，以及桌面与前端生产构建。
+主要产物：
 
-更多镜像说明见 [images/README.md](images/README.md)。
+```text
+bin/
+├── CTF-BTFly.exe
+└── ctfagent-daemon.exe
+```
+
+GUI 启动时会优先连接已有 daemon；未检测到可用实例时，会自动启动同目录的 `ctfagent-daemon.exe`。
+
+## 模型网关配置
+
+| 环境变量                         | 必填 | 默认值             | 作用                                          |
+| -------------------------------- | ---: | ------------------ | --------------------------------------------- |
+| `CTF_UPSTREAM_MODEL_BASE_URL`    |   是 | —                  | OpenAI-compatible API 基础地址                |
+| `CTF_UPSTREAM_MODEL_API_KEY`     |   是 | —                  | 真实上游 API Key，仅 daemon 持有              |
+| `CTF_MODEL_ID`                   |   是 | —                  | Agent 使用的模型 ID                           |
+| `CTF_MODEL_INCLUDE_STREAM_USAGE` |   否 | `true`             | 为流式请求加入 `stream_options.include_usage` |
+| `CTF_AGENT_ENV_FILE`             |   否 | 程序同目录 `.env`  | 显式指定 daemon 配置文件                      |
+| `CTF_AGENT_DATA_DIR`             |   否 | 程序同目录 `data/` | 覆盖 SQLite、日志和工作区目录                 |
+| `CTF_DAEMON_ADDRESS`             |   否 | `127.0.0.1:17321`  | daemon 监听地址                               |
+| `CTF_DAEMON_TOKEN`               |   否 | 自动安全生成       | 覆盖本地控制平面 Token                        |
+| `CTF_DAEMON_EXECUTABLE`          |   否 | 自动查找           | GUI 启动的 daemon 路径                        |
+| `DOCKER_HOST`                    |   否 | Docker SDK 默认    | 指定 Docker Engine                            |
+
+daemon 会为每次任务启动签发随机短期 Token。容器通过：
+
+```text
+http://host.docker.internal:<daemon-port>/model
+```
+
+访问本地模型网关。SQLite 用量账本只保存模型名、Token 数、状态码和耗时，不保存 Prompt、回复、请求头或真实 Key。
+
+## 使用流程
+
+1. 点击“新建题目”；
+2. 选择题型并填写题目描述、授权目标和 Flag 格式；
+3. 拖拽上传题目文件或整个附件目录；
+4. 启动任务，观察沙箱状态和实时分析时间线；
+5. 必要时暂停任务，补充线索后恢复原 Pi 会话；
+6. 在“文件”页查看脚本、响应和分析产物；
+7. 在“Writeup”页查看或下载完整中文题解；
+8. 任务结束后关闭容器释放资源，或保留实例进行人工检查；
+9. 对已结束任务可重新尝试或永久删除。
+
+每道题的默认工作区结构：
+
+```text
+data/workspaces/task_xxx/
+├── attachments/       用户上传的题目附件
+├── artifacts/         Agent 保存的脚本、响应和证据
+├── .pi-sessions/      Pi 会话数据
+└── WRITEUP.md         中文可复现解题报告
+```
+
+## 沙箱与安全模型
+
+| 控制项              | 当前策略                         |
+| ------------------- | -------------------------------- |
+| 默认内存            | 4 GiB                            |
+| 默认 CPU            | 4 核配额                         |
+| 默认 PID            | 512                              |
+| Linux capabilities  | 默认全部移除                     |
+| Pwn 额外能力        | `SYS_PTRACE`                     |
+| `no-new-privileges` | 启用                             |
+| Docker Socket       | 不挂载                           |
+| 宿主机目录          | 只挂载当前题目工作区             |
+| 模型凭据            | 容器只获得任务级短期 Token       |
+| 普通题运行时        | 优先 gVisor，开发环境可降级 runc |
+| Pwn 运行时          | 优先 Kata，开发环境可降级 runc   |
+
+> [!WARNING]
+> 当前实现仍使用 Docker bridge 网络，尚未在网络层强制目标白名单。  
+> `runc` 降级模式只适合本地开发和可信题目；不要把它视为针对恶意二进制的强隔离边界。
+
+更完整的边界、已知风险和修复建议见[代码审计报告](./docs/代码审计报告.md)。
+
+## 题型与专项镜像
+
+| 题型      | 镜像                           | 代表工具                                      | 目标运行时  |
+| --------- | ------------------------------ | --------------------------------------------- | ----------- |
+| Web       | `ctf-agent-pi-web:0.1.0`       | Nmap、SQLMap、Gobuster、WhatWeb               | gVisor      |
+| Crypto    | `ctf-agent-pi-crypto:0.1.0`    | John、gmpy2、PyCryptodome、SymPy、Z3          | gVisor      |
+| Pwn       | `ctf-agent-pi-pwn:0.1.0`       | GDB、QEMU、Pwntools、Ropper、Checksec         | Kata/VM     |
+| Reverse   | `ctf-agent-pi-reverse:0.1.0`   | Apktool、angr、GDB、Strace、Ltrace            | gVisor/Kata |
+| Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility | gVisor/Kata |
+| Misc      | `ctf-agent-pi-misc:0.1.0`      | FFmpeg、ImageMagick、Steghide、ZBar、SciPy    | gVisor      |
+
+镜像详细说明见 [`images/README.md`](./images/README.md)。
+
+## 项目结构
+
+```text
+CTFAgentPi/
+├── agents/                  Pi 通用规则、Provider 与题型入口 Skill
+├── build/                   Wails 跨平台构建和打包配置
+├── cmd/daemon/              独立 Go daemon 入口
+├── docs/                    项目结构与代码审计文档
+├── frontend/                React + TypeScript + Tailwind 桌面前端
+├── images/                  基础与六类专项 Docker 镜像
+├── internal/
+│   ├── agent/               任务编排、Pi RPC、Flag 与专项交接
+│   ├── api/                 REST、WebSocket、鉴权、上传和下载
+│   ├── appdata/             数据目录、连接文件和 daemon Token
+│   ├── daemon/              控制平面依赖装配与生命周期
+│   ├── envfile/             本地 .env 解析
+│   ├── eventhub/            进程内实时事件广播
+│   ├── modelgateway/        模型反向代理与 Token 用量
+│   ├── platform/            核心领域模型
+│   ├── sandbox/             Docker 沙箱管理
+│   └── storage/             SQLite 数据访问
+├── skills/                  CTF 方法与参考资料库
+├── main.go                  Wails 桌面入口
+├── desktopservice.go        GUI 与 daemon 桥接
+├── Taskfile.yml             开发、构建和打包任务
+└── go.mod                   Go 模块定义
+```
+
+完整逐文件说明见[项目结构说明](./docs/项目结构说明.md)。
+
+## 开发与验证
+
+```powershell
+# Go 全量测试
+go test ./...
+
+# Go 静态检查
+go vet ./...
+
+# 前端类型检查与生产构建
+cd frontend
+npm run build
+cd ..
+
+# 构建独立 daemon
+go build -buildvcs=false -o "bin\ctfagent-daemon.exe" .\cmd\daemon
+
+# 构建桌面程序
+wails3 build
+```
+
+当前测试覆盖：
+
+- SQLite 任务、事件序号与断线重放；
+- 父子任务模型用量聚合；
+- 模型短期 Token 替换和 usage 解析；
+- 流式请求自动加入 usage 选项；
+- HTTP 鉴权、任务创建与事件查询；
+- Pi 文本和工具事件标准化；
+- `.env` 优先级与错误输入；
+- 附件基础目录穿越检查；
+- 最终 Flag 章节提取。
+
+## 当前限制
+
+- Windows 是当前主要支持平台，其他 Wails 平台尚未完成 CTF 工具链验证；
+- Docker bridge 网络尚未强制授权目标白名单；
+- gVisor/Kata 不可用时会回退 runc 开发模式；
+- “终端”页是 Pi 工具输出转录，不是交互式 PTY；
+- 当前专项协作只实现 `Misc → Crypto`；
+- daemon 异常重启后的活跃任务状态恢复仍需完善；
+- 工作区、事件和模型流式缓冲仍需增加更完整的配额边界；
+- 仓库当前未包含 `LICENSE` 文件，公开分发前应由维护者明确许可证。
+
+## 最后
+
+欢迎交流:921416626
