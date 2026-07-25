@@ -5,6 +5,9 @@
 // @ts-ignore: Unused imports
 import { Create as $Create } from "@wailsio/runtime";
 
+/**
+ * ExitCheck 描述 daemon 是否允许 GUI 安全退出。
+ */
 export class ExitCheck {
     "canExit": boolean;
     "running"?: RunningTask[];
@@ -31,6 +34,9 @@ export class ExitCheck {
     }
 }
 
+/**
+ * RunningTask 是退出检查返回给桌面端的最小任务摘要。
+ */
 export class RunningTask {
     "id": string;
     "title": string;

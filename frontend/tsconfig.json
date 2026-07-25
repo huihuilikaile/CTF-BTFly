@@ -6,7 +6,7 @@
     "module": "ESNext",
     "skipLibCheck": true,
 
-    /* Bundler mode */
+    /* 使用 Vite/ESM 的打包器解析模式，TypeScript 只检查类型而不直接输出文件。 */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
@@ -14,7 +14,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
-    /* Linting */
+    /* 开启严格类型检查，并把未使用局部变量和 switch 穿透视为错误。 */
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": false,

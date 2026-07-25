@@ -2,18 +2,22 @@ import { useEffect, useRef, useState } from 'react'
 import { PlatformClient } from './api'
 import type { PlatformEvent } from './types'
 
+// 每个任务最多在前端保留 5000 条事件；SQLite 中仍保存完整历史。
 const maxCachedEvents = 5_000
 const eventCache = new Map<string, PlatformEvent[]>()
 
+// snapshot 带 taskId，防止任务快速切换时把上一任务异步结果绘制到当前页面。
 type EventSnapshot = {
   taskId?: string
   events: PlatformEvent[]
 }
 
+// lastSequenceOf 返回增量拉取与 WebSocket 重连所需的游标。
 function lastSequenceOf(events: PlatformEvent[]) {
   return events.length === 0 ? 0 : events[events.length - 1].sequence
 }
 
+// mergeEvents 按 sequence 去重、排序并裁剪缓存，兼容 REST 历史与 WS 实时数据重叠。
 function mergeEvents(taskId: string, current: PlatformEvent[], incoming: PlatformEvent[]) {
   if (incoming.length === 0) return current
 
@@ -40,6 +44,7 @@ export function useTaskEvents(client: PlatformClient | null, taskId?: string) {
   const cachedEvents = taskId ? eventCache.get(taskId) ?? [] : []
   const events = snapshot.taskId === taskId ? snapshot.events : cachedEvents
 
+  // client 或 taskId 变化时重建 REST/WS 同步链，并在清理函数中停止重连。
   useEffect(() => {
     setConnected(false)
 
@@ -57,6 +62,7 @@ export function useTaskEvents(client: PlatformClient | null, taskId?: string) {
     let socket: WebSocket | undefined
     let retry: number | undefined
 
+    // publish 统一合并任何来源的事件，并只更新仍显示同一任务的快照。
     const publish = (incoming: PlatformEvent[]) => {
       if (disposed || incoming.length === 0) return
 
@@ -66,11 +72,12 @@ export function useTaskEvents(client: PlatformClient | null, taskId?: string) {
       setSnapshot(active => active.taskId === taskId ? { taskId, events: next } : active)
     }
 
-    // 首次打开从 REST 拉取已保存的历史；重新进入则只补齐缓存之后的事件。
+    // 首次打开从 REST 拉取已保存历史；重新进入则只补齐缓存之后的事件。
     void client.events(taskId, lastSequence.current).then(publish).catch(() => {
       // WebSocket 仍会尝试补齐历史，REST 失败不应影响实时事件。
     })
 
+    // WebSocket 使用最后 sequence 建连；断开后固定延迟重连，服务端会先补历史。
     const connect = () => {
       if (disposed) return
 
@@ -93,6 +100,8 @@ export function useTaskEvents(client: PlatformClient | null, taskId?: string) {
     }
 
     connect()
+
+    // 组件卸载或任务切换时阻止旧回调写入状态，并释放 Socket/计时器。
     return () => {
       disposed = true
       socket?.close()

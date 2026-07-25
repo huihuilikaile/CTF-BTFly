@@ -25,14 +25,15 @@ import (
 	"github.com/ctfagentpi/ctfagentpi/internal/storage"
 )
 
+// 三个正则只接受 WRITEUP.md 中“最终 Flag”标题下的首个代码块，
+// 避免把命令输出、示例格式或失败猜测当成成功结果。
 var (
 	finalFlagHeading    = regexp.MustCompile(`(?im)^#{1,6}\s*最终\s*Flag\s*$`)
 	nextMarkdownHeading = regexp.MustCompile(`(?m)^#{1,6}\s+`)
 	finalFlagCodeBlock  = regexp.MustCompile("(?s)```[^\\r\\n]*\\r?\\n(.*?)```")
 )
 
-// ErrTaskNotDeletable prevents a finished-task cleanup request from racing an
-// active Pi process or deleting a task that has not run yet.
+// 这些哨兵错误描述任务状态机的操作边界，API 层据此映射为 409 Conflict。
 var (
 	ErrTaskNotDeletable   = errors.New("only settled, failed, or cancelled tasks can be deleted")
 	ErrSandboxNotClosable = errors.New("only a settled, failed, or cancelled task instance can be closed")
@@ -43,6 +44,7 @@ var (
 	ErrTaskNotResumable   = errors.New("only a paused task can be resumed")
 )
 
+// Service 是任务编排核心：连接 SQLite、事件 Hub、Docker 沙箱和模型网关。
 type Service struct {
 	store      *storage.Store
 	hub        *eventhub.Hub
@@ -51,22 +53,29 @@ type Service struct {
 	workspaces string
 	publicURL  string
 	mu         sync.Mutex
-	tokens     map[string]string
-	settled    map[string]bool
-	paused     map[string]bool
+	// schedulerMu 串行化“检查名额 → 写入状态 → 创建容器”流程，避免并发 HTTP
+	// 请求绕过全局上限或为同一个排队任务重复创建 Pi 沙箱。
+	schedulerMu sync.Mutex
+	// delegationMu 串行化父子 Agent 的请求消费、结果回传和父任务恢复，
+	// 避免多个子 Agent 同时结束时重复重启父容器。
+	delegationMu sync.Mutex
+	tokens       map[string]string
+	settled      map[string]bool
+	paused       map[string]bool
 }
 
+// 预览与 Flag 提取都采用有界读取，避免前端或正则处理超大 Agent 产物。
 const maxWorkspacePreviewBytes = 1 << 20
 const maxWriteupFlagBytes = 4 << 20
 
-// WorkspaceFile is safe-to-display metadata for a file the agent created in a
-// task workspace. The source file itself remains on the local machine.
+// WorkspaceFile 是可安全展示的工作区文件元数据，原文件仍留在本机。
 type WorkspaceFile struct {
 	Path       string    `json:"path"`
 	Size       int64     `json:"size"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
+// WorkspaceFileContent 是最多 1 MiB 的文件预览结果。
 type WorkspaceFileContent struct {
 	Path      string `json:"path"`
 	Content   string `json:"content"`
@@ -74,13 +83,13 @@ type WorkspaceFileContent struct {
 	Binary    bool   `json:"binary"`
 }
 
-// AttachmentUpload is a request-scoped reader supplied by the API layer. Its
-// target path is always resolved below /workspace/attachments.
+// AttachmentUpload 由 API 层提供请求期读取器，目标路径必须解析到 attachments/ 下。
 type AttachmentUpload struct {
 	Path string
 	Open func() (io.ReadCloser, error)
 }
 
+// NewService 注入全部基础设施，并初始化题目 Token、结束状态和暂停状态索引。
 func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Manager, gateway *modelgateway.Gateway, workspaces, publicURL string) *Service {
 	return &Service{
 		store: store, hub: hub, sandboxes: sandboxes, gateway: gateway,
@@ -89,6 +98,7 @@ func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Mana
 	}
 }
 
+// CreateTask 校验用户输入、选择专项镜像、持久化任务并写入首条创建事件。
 func (s *Service) CreateTask(ctx context.Context, input platform.CreateTask) (platform.Task, error) {
 	category, err := platform.ParseCategory(input.Category)
 	if err != nil {
@@ -97,6 +107,8 @@ func (s *Service) CreateTask(ctx context.Context, input platform.CreateTask) (pl
 	if strings.TrimSpace(input.Title) == "" || strings.TrimSpace(input.Description) == "" {
 		return platform.Task{}, fmt.Errorf("title and description are required")
 	}
+
+	// 任务 ID、状态、镜像和时间均由 daemon 生成，不能由前端伪造。
 	now := time.Now()
 	task := platform.Task{
 		ID: platform.NewID("task"), Title: strings.TrimSpace(input.Title), Category: category,
@@ -111,7 +123,17 @@ func (s *Service) CreateTask(ctx context.Context, input platform.CreateTask) (pl
 	return task, nil
 }
 
+// Start 根据全局执行上限立即启动任务，或将它持久化为 queued 等待队列。
+// 进入队列的任务会在任何运行名额释放后由 DispatchQueued 自动拉起。
 func (s *Service) Start(ctx context.Context, taskID string) error {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	return s.startOrQueueLocked(ctx, taskID)
+}
+
+// startOrQueueLocked 必须在 schedulerMu 保护下调用。
+func (s *Service) startOrQueueLocked(ctx context.Context, taskID string) error {
+	// 防止为正在创建、运行或暂停的任务重复创建容器。
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -119,25 +141,74 @@ func (s *Service) Start(ctx context.Context, taskID string) error {
 		}
 		return err
 	}
-	if task.Status == platform.TaskRunning || task.Status == platform.TaskProvisioning || task.Status == platform.TaskPaused {
+	if task.Status == platform.TaskRunning || task.Status == platform.TaskProvisioning || task.Status == platform.TaskPaused || task.Status == platform.TaskDelegating {
 		return fmt.Errorf("task is already running")
 	}
-	token, err := s.gateway.Issue(taskID)
+	if task.Status == platform.TaskQueued {
+		// 用户再次点击排队任务时不重复入队，而是立即尝试调度队首。
+		return s.dispatchQueuedLocked(ctx)
+	}
+	settings, err := s.store.ExecutionSettings(ctx)
+	if err != nil {
+		return err
+	}
+	active, err := s.store.CountActiveTasks(ctx)
+	if err != nil {
+		return err
+	}
+	if active >= settings.MaxConcurrentTasks {
+		if err := s.store.UpdateTaskState(ctx, taskID, platform.TaskQueued, "", "", ""); err != nil {
+			return err
+		}
+		status, _ := s.queueStatus(ctx)
+		position := status.QueuedTaskCount
+		for _, queued := range status.Queue {
+			if queued.TaskID == taskID {
+				position = queued.Position
+				break
+			}
+		}
+		_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "scheduler", Type: "task.queued", Payload: platform.JSONPayload(map[string]any{
+			"position": position, "active": active, "limit": settings.MaxConcurrentTasks,
+		})})
+		return nil
+	}
+	return s.startNow(ctx, task)
+}
+
+// startNow 为已获取运行名额的任务签发模型 Token、创建 Docker 沙箱并启动读取协程。
+// 调用方负责持有 schedulerMu，确保在 Docker 创建期间其他请求不会越过容量上限。
+func (s *Service) startNow(ctx context.Context, task platform.Task) error {
+	// 在创建任何 Docker 容器、签发任务 Token 前，先验证真实模型接口是否可用。
+	// 这样 522、鉴权错误或错误模型名会直接反馈给用户，而不会被 Pi 表现为
+	// “Agent 空闲 / 本轮结束”。
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_started", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID()})})
+	if err := s.gateway.Probe(ctx); err != nil {
+		message := "model connection check failed: " + err.Error()
+		_ = s.store.UpdateTaskState(ctx, task.ID, task.Status, task.Runtime, task.ContainerID, message)
+		_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_failed", Payload: platform.JSONPayload(map[string]string{"error": err.Error()})})
+		return fmt.Errorf("%s", message)
+	}
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_succeeded", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID()})})
+
+	// 每次启动都签发新 Token，并重置本进程内的结束/暂停标志。
+	token, err := s.gateway.Issue(task.ID)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.tokens[taskID] = token
-	s.settled[taskID] = false
-	delete(s.paused, taskID)
+	s.tokens[task.ID] = token
+	s.settled[task.ID] = false
+	delete(s.paused, task.ID)
 	s.mu.Unlock()
-	if err := s.store.UpdateTaskState(ctx, taskID, platform.TaskProvisioning, "", "", ""); err != nil {
+	if err := s.store.UpdateTaskState(ctx, task.ID, platform.TaskProvisioning, "", "", ""); err != nil {
 		s.gateway.Revoke(token)
 		return err
 	}
-	_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "sandbox", Type: "sandbox.provisioning", Payload: platform.JSONPayload(map[string]string{"image": task.Image})})
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "sandbox", Type: "sandbox.provisioning", Payload: platform.JSONPayload(map[string]string{"image": task.Image})})
 
-	workspace := filepath.Join(s.workspaces, taskID)
+	// Prompt 由 daemon 固定策略与题目数据组合；容器只能通过宿主模型网关联网调用模型。
+	workspace := filepath.Join(s.workspaces, task.ID)
 	prompt := buildPrompt(task)
 	session, err := s.sandboxes.Start(context.Background(), sandbox.StartConfig{
 		Task: task, Workspace: workspace, Prompt: prompt,
@@ -145,24 +216,141 @@ func (s *Service) Start(ctx context.Context, taskID string) error {
 		Network: true,
 	})
 	if err != nil {
+		// 创建失败时撤销短期 Token、持久化失败状态并广播原因。
 		s.gateway.Revoke(token)
-		_ = s.store.UpdateTaskState(ctx, taskID, platform.TaskFailed, "", "", err.Error())
-		_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "sandbox", Type: "task.failed", Payload: platform.JSONPayload(map[string]string{"error": err.Error()})})
+		_ = s.store.UpdateTaskState(ctx, task.ID, platform.TaskFailed, "", "", err.Error())
+		_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "sandbox", Type: "task.failed", Payload: platform.JSONPayload(map[string]string{"error": err.Error()})})
 		return err
 	}
-	if err := s.store.UpdateTaskState(ctx, taskID, platform.TaskRunning, session.Runtime, session.ContainerID, ""); err != nil {
-		_ = s.sandboxes.Stop(context.Background(), taskID, true)
+	if err := s.store.UpdateTaskState(ctx, task.ID, platform.TaskRunning, session.Runtime, session.ContainerID, ""); err != nil {
+		_ = s.sandboxes.Stop(context.Background(), task.ID, true)
 		return err
 	}
-	_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "sandbox", Type: "sandbox.started", Payload: platform.JSONPayload(map[string]string{
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "sandbox", Type: "sandbox.started", Payload: platform.JSONPayload(map[string]string{
 		"containerId": session.ContainerID, "runtime": session.Runtime,
 	})})
+
+	// stdout 是 Pi JSONL 协议，stderr 是普通诊断文本，必须分开读取。
 	go s.readRPC(task, session.Stdout)
 	go s.readStderr(task.ID, session.Stderr)
 	return nil
 }
 
+// QueueStatus 返回 UI 所需的执行上限、运行占用和 FIFO 排队详情。
+func (s *Service) QueueStatus(ctx context.Context) (platform.SchedulerStatus, error) {
+	return s.queueStatus(ctx)
+}
+
+func (s *Service) queueStatus(ctx context.Context) (platform.SchedulerStatus, error) {
+	settings, err := s.store.ExecutionSettings(ctx)
+	if err != nil {
+		return platform.SchedulerStatus{}, err
+	}
+	active, err := s.store.CountActiveTasks(ctx)
+	if err != nil {
+		return platform.SchedulerStatus{}, err
+	}
+	queued, err := s.store.ListQueuedTasks(ctx)
+	if err != nil {
+		return platform.SchedulerStatus{}, err
+	}
+	status := platform.SchedulerStatus{Settings: settings, ActiveTaskCount: active, QueuedTaskCount: len(queued), Queue: make([]platform.QueuedTask, 0, len(queued))}
+	for index, task := range queued {
+		status.Queue = append(status.Queue, platform.QueuedTask{TaskID: task.ID, Title: task.Title, Category: task.Category, Position: index + 1, Internal: task.ParentTaskID != "", QueuedAt: task.UpdatedAt})
+	}
+	return status, nil
+}
+
+// UpdateExecutionSettings 保存用户手动选择的并发上限；提高上限后立即尝试
+// 拉起队首任务，降低上限不会强制终止已经运行的题目。
+func (s *Service) UpdateExecutionSettings(ctx context.Context, settings platform.ExecutionSettings) (platform.ExecutionSettings, error) {
+	if err := settings.Validate(); err != nil {
+		return platform.ExecutionSettings{}, err
+	}
+	s.schedulerMu.Lock()
+	err := s.store.UpdateExecutionSettings(ctx, settings)
+	s.schedulerMu.Unlock()
+	if err != nil {
+		return platform.ExecutionSettings{}, err
+	}
+	go func() { _ = s.DispatchQueued(context.Background()) }()
+	return settings, nil
+}
+
+// DispatchQueued 在启动时、任务结束后和提高上限后调用，尽可能填满空闲名额。
+func (s *Service) DispatchQueued(ctx context.Context) error {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	return s.dispatchQueuedLocked(ctx)
+}
+
+func (s *Service) dispatchQueuedLocked(ctx context.Context) error {
+	for {
+		status, err := s.queueStatus(ctx)
+		if err != nil || status.ActiveTaskCount >= status.Settings.MaxConcurrentTasks || len(status.Queue) == 0 {
+			return err
+		}
+		next, err := s.store.GetTask(ctx, status.Queue[0].TaskID)
+		if err != nil {
+			return err
+		}
+		if err := s.startNow(ctx, next); err != nil {
+			// Docker/image 错误会把当前任务标为 failed，可继续尝试后续队列；
+			// 模型网关未配置等前置错误会保留 queued，等待用户修复配置。
+			current, getErr := s.store.GetTask(ctx, next.ID)
+			if getErr == nil && current.Status == platform.TaskFailed {
+				continue
+			}
+			return err
+		}
+	}
+}
+
+// requestQueueDispatch 避免 RPC 读取协程因启动下一题而阻塞。
+func (s *Service) requestQueueDispatch() { go func() { _ = s.DispatchQueued(context.Background()) }() }
+
+// Abort 中止当前 Pi 回合并把任务置为 cancelled，但保留容器和工作区供检查。
 func (s *Service) Abort(ctx context.Context, taskID string) error {
+	// 排队任务尚未创建容器，直接取消队列意图即可。
+	queuedTask, err := s.store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if queuedTask.Status == platform.TaskQueued {
+		if err := s.store.UpdateTaskState(ctx, taskID, platform.TaskCancelled, "", "", ""); err != nil {
+			return err
+		}
+		_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "scheduler", Type: "task.cancelled", Payload: platform.JSONPayload(map[string]string{"reason": "user cancelled queued task"})})
+		if queuedTask.ParentTaskID != "" {
+			go func() { _ = s.finishGenericSubtask(queuedTask, "cancelled", "子任务在排队期间被取消") }()
+		}
+		return nil
+	}
+	if queuedTask.Status == platform.TaskDelegating {
+		// 父实例已释放；先标记父任务取消，再逐个取消/中止其子 Agent。
+		// 子任务的回传逻辑会看到父任务已取消，因此只归档结果而不会恢复父任务。
+		if err := s.store.UpdateTaskState(ctx, taskID, platform.TaskCancelled, "", "", ""); err != nil {
+			return err
+		}
+		children, err := s.store.ListChildTasks(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if isFinished(child.Status) {
+				continue
+			}
+			if child.Status == platform.TaskReady {
+				_ = s.store.UpdateTaskState(ctx, child.ID, platform.TaskCancelled, "", "", "parent task cancelled")
+				go func(task platform.Task) { _ = s.finishGenericSubtask(task, "cancelled", "父任务已取消") }(child)
+				continue
+			}
+			_ = s.Abort(ctx, child.ID)
+		}
+		s.emitDelegationEvent(taskID, "delegation.cancelled", map[string]string{"message": "已取消父任务及其未完成子 Agent"})
+		s.requestQueueDispatch()
+		return nil
+	}
 	if err := s.sandboxes.Abort(ctx, taskID); err != nil {
 		return err
 	}
@@ -173,15 +361,17 @@ func (s *Service) Abort(ctx context.Context, taskID string) error {
 	s.mu.Unlock()
 	_ = s.store.UpdateTaskState(ctx, taskID, platform.TaskCancelled, task.Runtime, task.ContainerID, "")
 	_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "system", Type: "task.cancelled", Payload: platform.JSONPayload(map[string]string{"reason": "user requested abort"})})
+
+	// 内部子任务取消后仍需回传已经产生的报告与产物。
 	if task.ParentTaskID != "" {
-		go func() { _ = s.finishCryptoHandoff(task, "cancelled", "密码专项任务已取消") }()
+		go func() { _ = s.finishGenericSubtask(task, "cancelled", "专项子任务已取消") }()
 	}
+	s.requestQueueDispatch()
 	return nil
 }
 
-// Pause aborts only the current Pi operation while preserving the sandbox,
-// session, workspace and artifacts. A later Resume continues the same Pi
-// session and therefore keeps the model's conversation context available.
+// Pause 只中止 Pi 当前回合，保留沙箱、会话、工作区和产物。
+// 后续 Resume 会继续同一 Pi 会话，因此模型对话上下文仍然可用。
 func (s *Service) Pause(ctx context.Context, taskID string) error {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -191,8 +381,8 @@ func (s *Service) Pause(ctx context.Context, taskID string) error {
 		return fmt.Errorf("%w (current status: %s)", ErrTaskNotPausable, task.Status)
 	}
 
-	// Mark the operation settled before sending abort. Pi may emit
-	// agent_settled immediately; markSettled must retain the paused state.
+	// 发送 abort 前先标记暂停。Pi 可能立即发出 agent_settled，
+	// markSettled 必须据此保留 paused，而不能错误转换为 settled。
 	s.mu.Lock()
 	s.paused[taskID] = true
 	s.settled[taskID] = true
@@ -211,9 +401,8 @@ func (s *Service) Pause(ctx context.Context, taskID string) error {
 	return nil
 }
 
-// Resume wakes the already-running Pi RPC process rather than provisioning a
-// new sandbox. The latest operator prompt is sent as a user message so notes
-// saved during the pause become immediately available to the agent.
+// Resume 唤醒已有 Pi RPC 进程而不是创建新沙箱。
+// 暂停期间保存的最新补充提示会作为用户消息立即提供给 Agent。
 func (s *Service) Resume(ctx context.Context, taskID string) error {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -226,6 +415,8 @@ func (s *Service) Resume(ctx context.Context, taskID string) error {
 	if extra := strings.TrimSpace(task.Prompt); extra != "" {
 		message += "\n\n操作员在暂停期间补充的信息：\n" + extra
 	}
+
+	// 先确认消息已送达原会话，再更新持久化状态，避免 UI 显示“运行中”但 RPC 不存在。
 	if err := s.sandboxes.Prompt(ctx, taskID, message); err != nil {
 		return err
 	}
@@ -240,21 +431,22 @@ func (s *Service) Resume(ctx context.Context, taskID string) error {
 	return nil
 }
 
-// UpdatePrompt stores an operator's extra direction for the next agent run.
-// The prompt is intentionally locked while Pi is running: a mid-run edit
-// would not affect its already-created system prompt and would be misleading.
+// UpdatePrompt 保存操作员给下一次运行的补充方向。
+// Pi 运行时锁定修改，因为此时系统 Prompt 已生成，中途编辑不会生效且会误导用户。
 func (s *Service) UpdatePrompt(ctx context.Context, taskID, prompt string) (platform.Task, error) {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
 		return platform.Task{}, err
 	}
-	if task.Status == platform.TaskProvisioning || task.Status == platform.TaskRunning {
+	if task.Status == platform.TaskProvisioning || task.Status == platform.TaskRunning || task.Status == platform.TaskDelegating {
 		return platform.Task{}, ErrPromptLocked
 	}
 	prompt = strings.TrimSpace(prompt)
 	if len(prompt) > 32*1024 {
 		return platform.Task{}, fmt.Errorf("prompt is too large (maximum 32 KiB)")
 	}
+
+	// 32 KiB 上限既限制数据库大小，也避免把过量补充内容塞进模型上下文。
 	if err := s.store.UpdateTaskPrompt(ctx, taskID, prompt); err != nil {
 		return platform.Task{}, err
 	}
@@ -263,9 +455,8 @@ func (s *Service) UpdatePrompt(ctx context.Context, taskID, prompt string) (plat
 	return task, nil
 }
 
-// Retry releases the old terminal sandbox (if it still exists) and starts Pi
-// with the task's latest prompt. The workspace remains mounted, so the agent
-// can reuse attachments and prior artifacts while attempting a new approach.
+// Retry 释放旧的终态沙箱，并使用最新 Prompt 重新启动 Pi。
+// 工作区继续保留，让 Agent 能复用附件与此前产物。
 func (s *Service) Retry(ctx context.Context, taskID string) error {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -281,9 +472,8 @@ func (s *Service) Retry(ctx context.Context, taskID string) error {
 	return s.Start(ctx, taskID)
 }
 
-// StoreAttachments copies uploaded files to the task's isolated workspace.
-// Folder-relative paths are retained, but traversal and absolute paths are
-// rejected before any host file is written.
+// StoreAttachments 把上传文件复制到任务隔离工作区。
+// 保留文件夹相对路径，但在写宿主机前拒绝绝对路径和目录穿越。
 func (s *Service) StoreAttachments(ctx context.Context, taskID string, uploads []AttachmentUpload) ([]WorkspaceFile, error) {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -295,6 +485,7 @@ func (s *Service) StoreAttachments(ctx context.Context, taskID string, uploads [
 	if len(uploads) == 0 {
 		return []WorkspaceFile{}, nil
 	}
+	// 所有文件统一落在 <task>/attachments，容器中对应 /workspace/attachments。
 	workspace, err := s.taskWorkspace(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -304,6 +495,7 @@ func (s *Service) StoreAttachments(ctx context.Context, taskID string, uploads [
 		return nil, fmt.Errorf("create attachments directory: %w", err)
 	}
 	saved := make([]WorkspaceFile, 0, len(uploads))
+	// 每个文件先验证目标、创建父目录，再以截断方式复制并显式检查 Close 错误。
 	for _, upload := range uploads {
 		target, relative, err := resolveAttachmentPath(attachmentsRoot, upload.Path)
 		if err != nil {
@@ -339,8 +531,8 @@ func (s *Service) StoreAttachments(ctx context.Context, taskID string, uploads [
 	return saved, nil
 }
 
-// Delete removes a finished task's sandbox, workspace, SQLite task row, and
-// cascaded event records. Active sandboxes are deliberately rejected.
+// Delete 删除已结束任务的沙箱、工作区、SQLite 任务行及级联事件。
+// 活跃任务会被明确拒绝，避免清理与 Pi 写文件并发。
 func (s *Service) Delete(ctx context.Context, taskID string) error {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -355,6 +547,7 @@ func (s *Service) Delete(ctx context.Context, taskID string) error {
 	if err := s.removeWorkspace(task.ID); err != nil {
 		return err
 	}
+	// 文件和容器清理成功后再撤销内存状态与模型 Token，最后删除数据库事实记录。
 	s.mu.Lock()
 	token := s.tokens[task.ID]
 	delete(s.tokens, task.ID)
@@ -366,8 +559,7 @@ func (s *Service) Delete(ctx context.Context, taskID string) error {
 	return s.store.DeleteTask(ctx, task.ID)
 }
 
-// CloseSandbox releases the Docker instance for a finished task but preserves
-// its workspace, writeup and event history for later review or restart.
+// CloseSandbox 释放已结束任务的 Docker 实例，但保留工作区、Writeup 和事件历史。
 func (s *Service) CloseSandbox(ctx context.Context, taskID string) error {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -379,8 +571,8 @@ func (s *Service) CloseSandbox(ctx context.Context, taskID string) error {
 	s.mu.Lock()
 	token := s.tokens[task.ID]
 	delete(s.tokens, task.ID)
-	// Closing a terminal session also closes its RPC stream. Mark it settled so
-	// the stream reader cannot overwrite the terminal status with a failure.
+	// 关闭终态会话也会终止 RPC 流。预先标记 settled，防止读取协程
+	// 把正常关闭错误覆盖成“流意外中断”。
 	s.settled[task.ID] = true
 	s.mu.Unlock()
 	if token != "" {
@@ -396,8 +588,21 @@ func (s *Service) CloseSandbox(ctx context.Context, taskID string) error {
 	return nil
 }
 
-// ListWorkspaceFiles returns at most 500 regular files, so the desktop UI can
-// browse scripts and artifacts without exposing arbitrary host paths.
+// ListSubtasks 返回根题目当前生命周期中创建的内部专项任务，供父题目的协作面板
+// 展示；子任务本身不会出现在全局题目列表中。
+func (s *Service) ListSubtasks(ctx context.Context, taskID string) ([]platform.Task, error) {
+	task, err := s.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task.ParentTaskID != "" {
+		return nil, fmt.Errorf("subtasks can only be listed for a root task")
+	}
+	return s.store.ListChildTasks(ctx, taskID)
+}
+
+// ListWorkspaceFiles 最多返回 500 个普通文件，使桌面端能浏览脚本和产物，
+// 同时不暴露任意宿主机路径。
 func (s *Service) ListWorkspaceFiles(ctx context.Context, taskID string) ([]WorkspaceFile, error) {
 	root, err := s.taskWorkspace(ctx, taskID)
 	if err != nil {
@@ -409,6 +614,7 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, taskID string) ([]Work
 		return nil, err
 	}
 	files := make([]WorkspaceFile, 0)
+	// 遍历时跳过目录、符号链接和设备等特殊文件，只返回相对路径元数据。
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -436,8 +642,8 @@ func (s *Service) ListWorkspaceFiles(ctx context.Context, taskID string) ([]Work
 	return files, nil
 }
 
-// ReadWorkspaceFile returns a bounded UTF-8 preview of one regular file. Path
-// traversal and symlinks outside the task workspace are rejected.
+// ReadWorkspaceFile 返回普通文件的有界 UTF-8 预览，并拒绝目录穿越及
+// 指向任务工作区之外的符号链接。
 func (s *Service) ReadWorkspaceFile(ctx context.Context, taskID, relativePath string) (WorkspaceFileContent, error) {
 	root, err := s.taskWorkspace(ctx, taskID)
 	if err != nil {
@@ -459,6 +665,7 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, taskID, relativePath st
 		return WorkspaceFileContent{}, err
 	}
 	defer file.Close()
+	// 多读一个字节用于准确判断截断，不把二进制内容强行转成字符串。
 	data, err := io.ReadAll(io.LimitReader(file, maxWorkspacePreviewBytes+1))
 	if err != nil {
 		return WorkspaceFileContent{}, err
@@ -475,9 +682,8 @@ func (s *Service) ReadWorkspaceFile(ctx context.Context, taskID, relativePath st
 	return preview, nil
 }
 
-// OpenWorkspaceFile returns a read-only handle for a task-local regular file.
-// API download handlers use it so the same path traversal and symlink boundary
-// checks apply to previews and file downloads.
+// OpenWorkspaceFile 返回任务内普通文件的只读句柄。
+// 下载与预览复用同一路径及符号链接边界检查。
 func (s *Service) OpenWorkspaceFile(ctx context.Context, taskID, relativePath string) (*os.File, error) {
 	root, err := s.taskWorkspace(ctx, taskID)
 	if err != nil {
@@ -497,6 +703,7 @@ func (s *Service) OpenWorkspaceFile(ctx context.Context, taskID, relativePath st
 	return os.Open(path)
 }
 
+// taskWorkspace 先确认任务存在，再返回由可信任务 ID 派生的工作区路径。
 func (s *Service) taskWorkspace(ctx context.Context, taskID string) (string, error) {
 	task, err := s.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -505,6 +712,7 @@ func (s *Service) taskWorkspace(ctx context.Context, taskID string) (string, err
 	return filepath.Join(s.workspaces, task.ID), nil
 }
 
+// removeWorkspace 在递归删除前验证最终绝对路径确实是工作区根目录的后代。
 func (s *Service) removeWorkspace(taskID string) error {
 	root, err := filepath.Abs(s.workspaces)
 	if err != nil {
@@ -524,7 +732,9 @@ func (s *Service) removeWorkspace(taskID string) error {
 	return nil
 }
 
+// resolveWorkspaceFile 对预览/下载路径执行词法边界与真实符号链接边界双重检查。
 func resolveWorkspaceFile(root, requested string) (string, error) {
+	// 第一层拒绝空路径、绝对路径和显式 ../ 穿越。
 	requested = filepath.Clean(filepath.FromSlash(strings.TrimSpace(requested)))
 	if requested == "." || requested == ".." || filepath.IsAbs(requested) || strings.HasPrefix(requested, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("invalid workspace file path")
@@ -538,6 +748,7 @@ func resolveWorkspaceFile(root, requested string) (string, error) {
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("invalid workspace file path")
 	}
+	// 第二层解析符号链接，并再次验证解析后文件仍在解析后的工作区根内。
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", err
@@ -553,6 +764,7 @@ func resolveWorkspaceFile(root, requested string) (string, error) {
 	return resolvedCandidate, nil
 }
 
+// resolveAttachmentPath 规范化上传携带的目录相对路径，并确保目标位于 attachments/。
 func resolveAttachmentPath(root, requested string) (string, string, error) {
 	requested = filepath.Clean(filepath.FromSlash(strings.TrimSpace(requested)))
 	if requested == "." || requested == ".." || filepath.IsAbs(requested) || strings.HasPrefix(requested, ".."+string(filepath.Separator)) {
@@ -573,12 +785,15 @@ func resolveAttachmentPath(root, requested string) (string, string, error) {
 	return target, relative, nil
 }
 
+// readRPC 按行解析 Pi stdout 的 JSONL 协议，持久化并广播标准化事件。
 func (s *Service) readRPC(task platform.Task, reader io.Reader) {
+	// Pi 工具输出可能较长，允许单条事件最多 16 MiB。
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := bytes.Clone(scanner.Bytes())
 		if !json.Valid(line) {
+			// 非法 JSON 不终止会话，记录协议错误后继续读取后续事件。
 			_, _ = s.emit(context.Background(), platform.Event{TaskID: task.ID, Source: "pi", Type: "agent.protocol_error", Payload: platform.JSONPayload(map[string]string{"line": string(line)})})
 			continue
 		}
@@ -591,6 +806,7 @@ func (s *Service) readRPC(task platform.Task, reader io.Reader) {
 	if err := scanner.Err(); err != nil {
 		_, _ = s.emit(context.Background(), platform.Event{TaskID: task.ID, Source: "pi", Type: "agent.stream_error", Payload: platform.JSONPayload(map[string]string{"error": err.Error()})})
 	}
+	// 若未收到 agent.settled 且并非用户取消，RPC 关闭被视为任务失败。
 	s.mu.Lock()
 	wasSettled := s.settled[task.ID]
 	s.mu.Unlock()
@@ -599,11 +815,13 @@ func (s *Service) readRPC(task platform.Task, reader io.Reader) {
 		_ = s.store.UpdateTaskState(context.Background(), task.ID, platform.TaskFailed, "", "", "Pi RPC stream closed unexpectedly")
 		_, _ = s.emit(context.Background(), platform.Event{TaskID: task.ID, Source: "system", Type: "task.failed", Payload: platform.JSONPayload(map[string]string{"error": "Pi RPC stream closed unexpectedly"})})
 		if current.ParentTaskID != "" {
-			go func() { _ = s.finishCryptoHandoff(current, "failed", "Pi RPC 流意外关闭") }()
+			go func() { _ = s.finishGenericSubtask(current, "failed", "Pi RPC 流意外关闭") }()
 		}
+		s.requestQueueDispatch()
 	}
 }
 
+// readStderr 将 Pi 标准错误逐行转为事件，供前端终端转录和问题排查。
 func (s *Service) readStderr(taskID string, reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 16*1024), 2*1024*1024)
@@ -612,11 +830,12 @@ func (s *Service) readStderr(taskID string, reader io.Reader) {
 	}
 }
 
+// markSettled 幂等处理 Pi 的 agent.settled 事件，并触发 Flag 检测或专项交接。
 func (s *Service) markSettled(taskID string) {
 	s.mu.Lock()
 	if s.paused[taskID] {
-		// The pause flow deliberately aborts Pi and it subsequently emits
-		// agent_settled. Keep the persisted task paused until Resume is called.
+		// 暂停流程主动 abort，Pi 随后会发出 agent_settled；
+		// 在 Resume 调用前必须保持持久化 paused 状态。
 		s.settled[taskID] = true
 		s.mu.Unlock()
 		return
@@ -629,20 +848,35 @@ func (s *Service) markSettled(taskID string) {
 	s.mu.Unlock()
 	task, _ := s.store.GetTask(context.Background(), taskID)
 	_ = s.store.UpdateTaskState(context.Background(), taskID, platform.TaskSettled, task.Runtime, task.ContainerID, "")
+	// 后续委派检查需要看到已持久化的终态；内存副本也同步更新，避免把
+	// 刚刚运行中的旧状态误判为不可委派。
+	task.Status = platform.TaskSettled
 	_, _ = s.emit(context.Background(), platform.Event{TaskID: taskID, Source: "system", Type: "task.settled", Payload: platform.JSONPayload(map[string]string{"message": "Pi is idle and the sandbox remains available"})})
 	s.detectWriteupFlags(context.Background(), taskID)
+	// 专项子任务完成后回传父任务；根任务则检查通用的最多三子 Agent 委派。
 	if task.ParentTaskID != "" {
-		go func() { _ = s.finishCryptoHandoff(task, "completed", "") }()
+		go func() { _ = s.finishGenericSubtask(task, "completed", "") }()
+		s.requestQueueDispatch()
 		return
 	}
-	if task.Category == platform.CategoryMisc {
-		go s.startRequestedCryptoHandoff(task)
+	if s.startRequestedSubtasks(task) {
+		s.requestQueueDispatch()
+		return
 	}
+	// 主 Agent 本轮暂时空闲但仍有子 Agent 在排队或运行时，保留父容器和
+	// 运行名额。这样子任务回传可以直接唤醒同一 Pi 会话，不会在全局容量已满
+	// 时额外创建第 N+1 个活跃实例。
+	if open, err := s.hasOpenSubtasks(task.ID); err == nil && open {
+		_ = s.store.UpdateTaskState(context.Background(), taskID, platform.TaskRunning, task.Runtime, task.ContainerID, "")
+		s.emitDelegationEvent(taskID, "delegation.parent_waiting", map[string]string{"message": "主 Agent 保留会话，继续等待并验证子 Agent 的并行结果"})
+		s.requestQueueDispatch()
+		return
+	}
+	s.requestQueueDispatch()
 }
 
-// detectWriteupFlags trusts only the explicit "## 最终 Flag" report section.
-// This avoids treating strings from tool output, prompts or failed hypotheses
-// as verified Flag candidates in the desktop UI.
+// detectWriteupFlags 只信任报告中明确的“## 最终 Flag”章节，
+// 避免把工具输出、Prompt 或失败假设中的字符串显示为已验证 Flag。
 func (s *Service) detectWriteupFlags(ctx context.Context, taskID string) {
 	root, err := s.taskWorkspace(ctx, taskID)
 	if err != nil {
@@ -661,12 +895,15 @@ func (s *Service) detectWriteupFlags(ctx context.Context, taskID string) {
 	if err != nil || len(data) > maxWriteupFlagBytes || !utf8.Valid(data) {
 		return
 	}
+	// 每个合法候选写入持久事件，前端无需重新解析整个报告即可显示成功提示。
 	for _, candidate := range flagsFromWriteup(string(data)) {
 		_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "writeup", Type: "flag.candidate", Payload: platform.JSONPayload(map[string]string{"value": candidate, "source": "WRITEUP.md / 最终 Flag"})})
 	}
 }
 
+// flagsFromWriteup 提取“最终 Flag”章节首个代码块中的单行值。
 func flagsFromWriteup(writeup string) []string {
+	// 先切出目标标题到下一个 Markdown 标题之间的内容。
 	section := finalFlagHeading.FindStringIndex(writeup)
 	if section == nil {
 		return nil
@@ -689,10 +926,12 @@ func flagsFromWriteup(writeup string) []string {
 	return []string{candidate}
 }
 
+// isFinished 判断任务是否进入允许关闭实例、重试或删除的终态。
 func isFinished(status platform.TaskStatus) bool {
 	return status == platform.TaskSettled || status == platform.TaskFailed || status == platform.TaskCancelled
 }
 
+// emit 先把事件写入 SQLite，再向实时 Hub 广播，确保实时消息都有持久化来源。
 func (s *Service) emit(ctx context.Context, event platform.Event) (platform.Event, error) {
 	stored, err := s.store.AppendEvent(ctx, event)
 	if err == nil {
@@ -701,6 +940,7 @@ func (s *Service) emit(ctx context.Context, event platform.Event) (platform.Even
 	return stored, err
 }
 
+// normalize 将 Pi RPC 原始事件类型映射到平台稳定事件命名，同时保留原始载荷。
 func normalize(taskID string, raw []byte) platform.Event {
 	var envelope struct {
 		Type       string          `json:"type"`
@@ -720,6 +960,7 @@ func normalize(taskID string, raw []byte) platform.Event {
 	if eventType == "" {
 		eventType = "pi." + envelope.Type
 	}
+	// message_update 的具体类别嵌套在 assistantMessageEvent 中，需要二次解析。
 	if envelope.Type == "message_update" {
 		var inner struct {
 			Type  string `json:"type"`
@@ -738,31 +979,44 @@ func normalize(taskID string, raw []byte) platform.Event {
 	return platform.Event{TaskID: taskID, Source: "pi", Type: eventType, TurnID: envelope.TurnID, ToolCallID: envelope.ToolCallID, Payload: bytes.Clone(raw)}
 }
 
+// buildPrompt 把题目数据、补充提示、交接规则、安全边界与 Writeup 规范
+// 组合成完全由 daemon 控制的最终系统 Prompt。
 func buildPrompt(task platform.Task) string {
 	extraPrompt := strings.TrimSpace(task.Prompt)
 	if extraPrompt == "" {
 		extraPrompt = "（无）"
 	}
+	// 根 Agent 可在有明确证据时委派最多三个互不冲突的专项子任务；子 Agent
+	// 不得再次委派。所有请求由 daemon 审核，并由独立容器执行。
 	handoffInstruction := ""
-	if task.Category == platform.CategoryMisc && task.ParentTaskID == "" {
+	if task.ParentTaskID == "" {
 		handoffInstruction = `
 
-【Misc → Crypto 专项交接】
-若题目核心阻塞点属于密码学（例如 RSA/AES/椭圆曲线/格攻击/自定义加密/约束求解），不要仅凭猜测继续尝试。请先将已提取的参数、密文、样本和关键发现保存到 /workspace/artifacts，然后创建 /workspace/.cpi/handoff/crypto-request.json，内容必须是：
+【主 Agent：受控子 Agent 协作】
+你负责本题全局判断、拆分、主线解题、证据整合和最终 Writeup。不要一开始就创建子 Agent；应先独立完成题目初判、附件盘点和最小验证。主 Agent 必须亲自持续推进并验证最可能的主路线；子 Agent 只用于扩大搜索宽度，绝不替代主 Agent，也不是主 Agent 停止解题的理由。
+
+当出现以下有明确证据的情形时，可以委派：多个互不依赖的文件/密文需要并行分析、Web 存在两个以上可独立验证的攻击面或利用路线、附件中的不同模块需要不同专项工具、或当前方向有明确阻塞且另一专项方向可验证地处理其中一个子问题。对 Web 题，已发现多个独立接口、源码模块、参数入口或候选漏洞链时，应优先将其中边界清晰且不影响主线的一条路线交给子 Agent，同时你继续验证优先级最高的路线。
+
+每个父题目在整个生命周期最多可创建 3 个子 Agent。子任务必须边界清晰、相互独立，不能仅仅让多个 Agent 重复猜同一条路线。先把必要参数、样本和中间结果写入 /workspace/artifacts，然后为每个子任务在 /workspace/.cpi/subtasks/requests/ 创建一个 JSON 文件，例如 /workspace/.cpi/subtasks/requests/01-crypto.json：
 {
-  "question": "需要 Crypto Agent 解决的具体问题",
-  "summary": "已完成的分析、参数含义和当前假设",
-  "artifactPaths": ["artifacts/example.txt"],
-  "expectedOutput": ["恢复明文", "可复现 Python 脚本"]
+  "category": "crypto",
+  "title": "RSA 参数求解",
+  "question": "只解决需要恢复私钥/明文的数学问题",
+  "summary": "已确认的参数含义、已尝试方法和当前阻塞点",
+  "artifactPaths": ["artifacts/rsa-params.txt", "artifacts/cipher.bin"],
+  "expectedOutput": ["明文或私钥", "可复现脚本", "验证步骤"]
 }
-只能引用当前工作区中实际存在的普通文件；不要写入绝对路径或目录。写完后完成本轮报告并结束本轮任务。CTF-BTFly 会启动隔离的 Crypto 专项实例，将其报告、脚本与结果回写到 /workspace/artifacts/handoffs/；随后会自动恢复杂项实例继续完成原题。`
-	}
-	if task.ParentTaskID != "" {
+
+category 只能是 web、pwn、reverse、crypto、forensics、misc；artifactPaths 只能引用当前工作区内实际存在的普通文件，不得使用绝对路径或目录。创建请求后，仍应继续你的主线分析、利用与验证，不要等待子 Agent。平台会保留你的父容器与 Pi 会话，并并行创建最多三个隔离子实例；子 Agent 的报告、脚本和结果会写回 /workspace/artifacts/subtasks/，平台会主动通知你读取、复现和整合。只有你可以决定原题是否真正完成。
+
+不得因为“完成初步枚举”“得到单一猜测”或“已经委派子任务”就宣布本题完成。除非你已独立验证 Flag 或已用报告清楚记录可复现的阻塞证据，否则必须继续至少一条合理的验证/替代路线。`
+	} else if isSubtask(task) {
 		handoffInstruction = `
 
-【专项子任务】
-这是受控的 Crypto 专项子任务。只处理 /workspace/handoff/request.json 中指定的问题及 /workspace/handoff/input、/workspace/attachments 中的材料；不得再创建子任务。必须把可复现脚本保存到 /workspace/artifacts，并在 WRITEUP.md 中给出可直接供父任务使用的结论、验证方式和下一步建议。`
+【专项子 Agent】
+这是主 Agent 调度的受控专项子任务。只处理 /workspace/handoff/request.json 中指定的问题及 /workspace/handoff/input、/workspace/attachments 中的材料；不得创建任何子任务或扩大问题范围。必须把可复现脚本、关键证据和结论保存到 /workspace/artifacts，并在 WRITEUP.md 中写明验证方式、脚本路径以及可供主 Agent 使用的下一步建议。`
 	}
+	// Skills 采用渐进式读取：先独立初判，再只加载与证据或阻塞点相关的资料。
 	handoffInstruction += fmt.Sprintf(`
 
 【按需使用 CTF Skills】
@@ -813,6 +1067,6 @@ func buildPrompt(task platform.Task) string {
 		task.Title, task.Category, task.Description, task.Target, task.FlagFormat, extraPrompt, handoffInstruction)
 }
 
-// BuildPromptPreview exposes the final system prompt to the local desktop UI
-// without letting the frontend construct or alter the policy text itself.
+// BuildPromptPreview 向本地桌面端公开最终系统 Prompt 的只读预览，
+// 但不允许前端自行构造或修改策略文本。
 func BuildPromptPreview(task platform.Task) string { return buildPrompt(task) }

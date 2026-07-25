@@ -5,6 +5,9 @@
 // @ts-ignore: Unused imports
 import { Create as $Create } from "@wailsio/runtime";
 
+/**
+ * Connection 是桌面进程发现 daemon 所需的最小连接信息。
+ */
 export class Connection {
     "baseUrl": string;
     "token": string;

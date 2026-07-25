@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestLoadFileUsesFileValuesForUnsetVariables 验证普通值和双引号值的解析。
 func TestLoadFileUsesFileValuesForUnsetVariables(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, ".env")
@@ -25,6 +26,7 @@ func TestLoadFileUsesFileValuesForUnsetVariables(t *testing.T) {
 	}
 }
 
+// TestLoadFileDoesNotOverrideProcessEnvironment 验证系统环境变量优先于 .env。
 func TestLoadFileDoesNotOverrideProcessEnvironment(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, ".env")
@@ -40,6 +42,7 @@ func TestLoadFileDoesNotOverrideProcessEnvironment(t *testing.T) {
 	}
 }
 
+// TestLoadFileRejectsInvalidLine 验证无等号的配置行会被拒绝。
 func TestLoadFileRejectsInvalidLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(path, []byte("not a valid environment line\n"), 0o600); err != nil {

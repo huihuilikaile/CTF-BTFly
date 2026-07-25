@@ -12,13 +12,17 @@ import (
 	"github.com/ctfagentpi/ctfagentpi/internal/platform"
 )
 
+// recordingSink 是测试用内存账本，用于观察网关生成的 ModelUsage。
 type recordingSink struct{ records []platform.ModelUsage }
 
+// RecordModelUsage 实现 UsageRecorder，并保留每次调用供断言。
 func (sink *recordingSink) RecordModelUsage(_ context.Context, usage platform.ModelUsage) error {
 	sink.records = append(sink.records, usage)
 	return nil
 }
 
+// TestGatewayReplacesTaskTokenWithUpstreamCredential 验证短期任务 Token
+// 不会转发给模型供应商，且路径正确去除了 /model 前缀。
 func TestGatewayReplacesTaskTokenWithUpstreamCredential(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/chat/completions" {
@@ -48,6 +52,63 @@ func TestGatewayReplacesTaskTokenWithUpstreamCredential(t *testing.T) {
 	}
 }
 
+// TestProbeUsesTheConfiguredModelEndpoint 验证启动前探测确实请求真实的
+// OpenAI 兼容模型接口，而不是仅检查一个可能不存在的 /health 或 /models。
+func TestProbeUsesTheConfiguredModelEndpoint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected probe path %q", request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer upstream-secret" {
+			t.Fatalf("missing upstream authorization")
+		}
+		var body struct {
+			Model  string `json:"model"`
+			Stream bool   `json:"stream"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Model != "probe-model" || body.Stream {
+			t.Fatalf("unexpected probe body %#v", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL + "/v1", UpstreamAPIKey: "upstream-secret", ModelID: "probe-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.Probe(context.Background()); err != nil {
+		t.Fatalf("expected successful probe, got %v", err)
+	}
+	status := gateway.ProbeStatus()
+	if !status.Configured || !status.Available || status.CheckedAt == nil || status.Error != "" {
+		t.Fatalf("unexpected successful probe status %#v", status)
+	}
+}
+
+func TestProbeReturnsActionableUpstreamStatus(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(522)
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL + "/v1", UpstreamAPIKey: "upstream-secret", ModelID: "probe-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.Probe(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 522") {
+		t.Fatalf("expected 522 probe error, got %v", err)
+	}
+	status := gateway.ProbeStatus()
+	if !status.Configured || status.Available || status.CheckedAt == nil || !strings.Contains(status.Error, "HTTP 522") {
+		t.Fatalf("unexpected failed probe status %#v", status)
+	}
+}
+
+// TestGatewayRecordsOpenAIUsage 验证普通 JSON 响应中的 Token 明细会完整记账。
 func TestGatewayRecordsOpenAIUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -80,6 +141,7 @@ func TestGatewayRecordsOpenAIUsage(t *testing.T) {
 	}
 }
 
+// TestParseUsageFromOpenAICompatibleAndResponsesShapes 覆盖两类常见 usage 字段命名。
 func TestParseUsageFromOpenAICompatibleAndResponsesShapes(t *testing.T) {
 	for _, source := range []string{
 		`{"usage":{"prompt_tokens":11,"completion_tokens":7}}`,
@@ -92,6 +154,7 @@ func TestParseUsageFromOpenAICompatibleAndResponsesShapes(t *testing.T) {
 	}
 }
 
+// TestEnsureStreamUsageAddsOpenAICompatibleOption 验证流式请求会自动要求最终 usage 块。
 func TestEnsureStreamUsageAddsOpenAICompatibleOption(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://gateway/model/v1/chat/completions", strings.NewReader(`{"model":"test","stream":true,"messages":[]}`))
 	request.Header.Set("Content-Type", "application/json")
