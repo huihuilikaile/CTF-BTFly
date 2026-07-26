@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -33,9 +34,10 @@ var images = map[platform.Category]string{
 
 // ModelAccess 是发给单个沙箱的短期模型网关配置，不包含真实上游 API Key。
 type ModelAccess struct {
-	BaseURL string
-	Token   string
-	ModelID string
+	BaseURL        string
+	Token          string
+	ModelID        string
+	SupportsImages bool
 }
 
 // StartConfig 汇总创建沙箱所需的题目、工作区、模型访问与资源上限。
@@ -189,6 +191,7 @@ func (m *Manager) Start(ctx context.Context, cfg StartConfig) (*Session, error) 
 			"CTF_MODEL_BASE_URL=" + cfg.Model.BaseURL,
 			"CTF_TASK_TOKEN=" + cfg.Model.Token,
 			"CTF_MODEL_ID=" + cfg.Model.ModelID,
+			"CTF_MODEL_SUPPORTS_IMAGES=" + strconv.FormatBool(cfg.Model.SupportsImages),
 			"CTF_TASK_ID=" + cfg.Task.ID,
 		},
 		Labels: map[string]string{

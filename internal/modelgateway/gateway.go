@@ -24,6 +24,7 @@ import (
 // 防止为了 Token 统计而无限缓冲模型内容。
 const maxJSONUsageCapture = 8 << 20
 const maxJSONRequestRewrite = 4 << 20
+const maxModelErrorMessageBytes = 4 << 10
 
 // modelProbeTimeout 限制启动前连通性检查的等待时间。它只在真正准备创建
 // 沙箱时调用，避免把不可用的上游模型错误伪装成 Pi 已正常结束一轮。
@@ -37,12 +38,20 @@ type Config struct {
 	// IncludeStreamUsage 要求 OpenAI 兼容上游在 SSE 尾部返回 usage；
 	// 若供应商拒绝 stream_options，可显式关闭。
 	IncludeStreamUsage bool
+	// SupportsImages 决定容器内 Provider 是否向上游发送图片内容块。默认 false，
+	// 以兼容 DeepSeek 等只接受文本 content 的 OpenAI 兼容接口。
+	SupportsImages bool
 }
 
 // UsageRecorder 由 SQLite Store 实现。通过小接口反转依赖，
 // 让反向代理无需直接引用存储包，也便于单元测试替换记录器。
 type UsageRecorder interface {
 	RecordModelUsage(context.Context, platform.ModelUsage) error
+}
+
+// ErrorReporter 将模型上游失败转为所属任务的可持久化事件。
+type ErrorReporter interface {
+	RecordModelError(context.Context, string, int, string)
 }
 
 // Gateway 保存上游代理、题目短期 Token 映射和可选用量记录器。
@@ -52,6 +61,7 @@ type Gateway struct {
 	mu       sync.RWMutex
 	tokens   map[string]string
 	recorder UsageRecorder
+	errors   ErrorReporter
 	probe    ProbeStatus
 }
 
@@ -119,13 +129,16 @@ func (g *Gateway) Configured() bool {
 }
 
 // ModelID 返回 daemon 固定配置的模型标识。
-func (g *Gateway) ModelID() string { return g.config.ModelID }
+func (g *Gateway) ModelID(_ ...string) string { return g.config.ModelID }
+
+// SupportsImages 返回当前上游是否明确支持 OpenAI 风格图片内容块。
+func (g *Gateway) SupportsImages(_ ...string) bool { return g.config.SupportsImages }
 
 // Probe 以一次极小的 OpenAI 兼容 chat/completions 请求验证上游地址、网络、
 // 鉴权和当前模型是否真的可用。相比仅访问 /models 或发 HEAD，它能提前发现
 // 522、模型名错误、权限不足和不兼容网关；探测不经过本地 /model 代理，也不会
 // 向任何容器暴露真实 API Key。
-func (g *Gateway) Probe(ctx context.Context) (err error) {
+func (g *Gateway) Probe(ctx context.Context, _ ...string) (err error) {
 	defer func() { g.recordProbeResult(err) }()
 	if !g.Configured() {
 		return fmt.Errorf("model gateway is not configured; set CTF_UPSTREAM_MODEL_BASE_URL, CTF_UPSTREAM_MODEL_API_KEY and CTF_MODEL_ID")
@@ -171,7 +184,7 @@ func (g *Gateway) Probe(ctx context.Context) (err error) {
 
 // ProbeStatus 返回最近一次显式检测的结果；尚未检测时 CheckedAt 为空，前端应
 // 显示“未检测”而不是臆测模型可用。
-func (g *Gateway) ProbeStatus() ProbeStatus {
+func (g *Gateway) ProbeStatus(_ ...string) ProbeStatus {
 	g.mu.RLock()
 	status := g.probe
 	g.mu.RUnlock()
@@ -191,6 +204,13 @@ func (g *Gateway) recordProbeResult(err error) {
 }
 
 // SetUsageRecorder 连接持久化账本；它是可选项，便于隔离测试网关。
+
+// SetErrorReporter 连接任务事件写入器，使上游模型失败可展示在前端时间线。
+func (g *Gateway) SetErrorReporter(reporter ErrorReporter) {
+	g.mu.Lock()
+	g.errors = reporter
+	g.mu.Unlock()
+}
 func (g *Gateway) SetUsageRecorder(recorder UsageRecorder) {
 	g.mu.Lock()
 	g.recorder = recorder
@@ -198,7 +218,7 @@ func (g *Gateway) SetUsageRecorder(recorder UsageRecorder) {
 }
 
 // Issue 为题目生成 256 位随机短期 Token，并建立 Token 到任务 ID 的映射。
-func (g *Gateway) Issue(taskID string) (string, error) {
+func (g *Gateway) Issue(taskID string, _ ...string) (string, error) {
 	if !g.Configured() {
 		return "", fmt.Errorf("model gateway is not configured; set CTF_UPSTREAM_MODEL_BASE_URL, CTF_UPSTREAM_MODEL_API_KEY and CTF_MODEL_ID")
 	}
@@ -318,6 +338,8 @@ func (g *Gateway) captureResponseUsage(response *http.Response) error {
 	response.Body = &usageCaptureBody{
 		ReadCloser:  response.Body,
 		contentType: response.Header.Get("Content-Type"),
+		statusCode:  response.StatusCode,
+		reportError: func(message string) { g.reportError(meta.taskID, response.StatusCode, message) },
 		complete: func(usage upstreamUsage) {
 			g.record(meta, usage, response.StatusCode, "completed")
 		},
@@ -329,6 +351,7 @@ func (g *Gateway) captureResponseUsage(response *http.Response) error {
 func (g *Gateway) handleProxyError(writer http.ResponseWriter, request *http.Request, err error) {
 	if meta, _ := request.Context().Value(requestUsageMetaKey{}).(*requestUsageMeta); meta != nil {
 		g.record(meta, upstreamUsage{}, 0, "transport_error")
+		g.reportError(meta.taskID, 0, "model upstream request failed")
 	}
 	http.Error(writer, "model upstream request failed", http.StatusBadGateway)
 }
@@ -363,11 +386,28 @@ func (g *Gateway) record(meta *requestUsageMeta, usage upstreamUsage, statusCode
 	})
 }
 
+// reportError 将上游拒绝或传输失败转换为任务事件；错误文本已在调用点限制长度，
+// 不携带 API Key、请求头或完整模型响应。
+func (g *Gateway) reportError(taskID string, statusCode int, message string) {
+	g.mu.RLock()
+	reporter := g.errors
+	g.mu.RUnlock()
+	if reporter == nil || taskID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reporter.RecordModelError(ctx, taskID, statusCode, message)
+}
+
 // usageCaptureBody 在响应复制给 Pi 时旁路观察内容。普通 JSON 只缓冲到上限；
 // SSE 按行解析，因此无需保存完整的长篇流式回答。
 type usageCaptureBody struct {
 	io.ReadCloser
 	contentType string
+	statusCode  int
+	errorBody   bytes.Buffer
+	reportError func(string)
 	jsonBody    bytes.Buffer
 	ssePending  []byte
 	usage       upstreamUsage
@@ -395,6 +435,14 @@ func (body *usageCaptureBody) Close() error {
 
 // capture 按 Content-Type 在 SSE 行解析与有界 JSON 缓冲之间选择。
 func (body *usageCaptureBody) capture(data []byte) {
+	if body.statusCode >= http.StatusBadRequest && body.errorBody.Len() < maxModelErrorMessageBytes {
+		remaining := maxModelErrorMessageBytes - body.errorBody.Len()
+		captured := data
+		if len(captured) > remaining {
+			captured = captured[:remaining]
+		}
+		_, _ = body.errorBody.Write(captured)
+	}
 	if strings.Contains(strings.ToLower(body.contentType), "text/event-stream") {
 		body.ssePending = append(body.ssePending, data...)
 
@@ -426,8 +474,28 @@ func (body *usageCaptureBody) finish() {
 		} else {
 			body.mergeUsage(body.jsonBody.Bytes())
 		}
+		if body.statusCode >= http.StatusBadRequest && body.reportError != nil {
+			body.reportError(modelErrorMessage(body.statusCode, body.errorBody.Bytes()))
+		}
 		body.complete(body.usage)
 	})
+}
+
+// modelErrorMessage 仅保留供应商错误对象中的 message，并截断为可安全展示的短文本。
+func modelErrorMessage(statusCode int, body []byte) string {
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) == nil && strings.TrimSpace(payload.Error.Message) != "" {
+		detail := strings.Join(strings.Fields(payload.Error.Message), " ")
+		if len(detail) > maxModelErrorMessageBytes {
+			detail = detail[:maxModelErrorMessageBytes] + "…"
+		}
+		return fmt.Sprintf("model upstream returned HTTP %d: %s", statusCode, detail)
+	}
+	return fmt.Sprintf("model upstream returned HTTP %d", statusCode)
 }
 
 // mergeUsage 只在当前片段包含合法 usage 时覆盖结果，

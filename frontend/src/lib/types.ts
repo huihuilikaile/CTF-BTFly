@@ -10,12 +10,12 @@ export interface DaemonConnection { baseUrl: string; token: string }
 // Task 是 REST API 返回的用户可见根任务。
 export interface Task {
   id: string; parentTaskId?: string; handoffId?: string; title: string; category: Category; description: string; prompt: string; target?: string; flagFormat?: string
-  status: TaskStatus; image: string; runtime?: string; containerId?: string; lastError?: string
+  modelProfile?: string; modelId?: string; status: TaskStatus; image: string; runtime?: string; containerId?: string; lastError?: string
   createdAt: string; updatedAt: string
 }
 
 // CreateTask 只包含允许用户提交的题目字段。
-export interface CreateTask { title: string; category: Category; description: string; target?: string; flagFormat?: string }
+export interface CreateTask { title: string; category: Category; description: string; target?: string; flagFormat?: string; modelProfile?: string }
 
 // TaskPrompt 分离可编辑补充提示、只读系统 Prompt 和当前可执行操作。
 export interface TaskPrompt {
@@ -67,7 +67,7 @@ export interface SchedulerStatus {
 export interface SystemStatus {
   daemon: { address: string; version: string }
   docker: DockerHealth
-  modelGateway: { configured: boolean; model: string; probe: ModelProbeStatus }
+  modelGateway: { configured: boolean; model: string; probe: ModelProbeStatus; defaultModel: string; models: ModelProfileStatus[] }
   scheduler: SchedulerStatus
   stack: string[]
 }
@@ -76,6 +76,28 @@ export interface SystemStatus {
 // 不包含 API 地址、密钥、Prompt 或模型响应内容。
 export interface ModelProbeStatus {
   configured: boolean; available: boolean; checkedAt?: string; error?: string
+}
+
+export interface ModelProfileStatus {
+  name: string; modelId: string; baseUrl: string; configured: boolean; hasApiKey: boolean
+  supportsImages: boolean; includeStreamUsage: boolean; default: boolean; probe: ModelProbeStatus
+}
+
+// ModelProbeResult 表示一次“重新读取 .env 后检测”的结果；configLoaded 为 true
+// 时，结果来自隔离的临时配置池，不会改变正在运行任务的模型网关。
+export interface ModelProbeResult extends ModelProbeStatus { configLoaded: boolean }
+
+// ModelConfigSummary 是 .env 内已保存模型的安全摘要，API Key 仅暴露是否存在。
+export interface ModelConfigSummary {
+  name: string; baseUrl: string; modelId: string; configured: boolean; hasApiKey: boolean
+  supportsImages: boolean; includeStreamUsage: boolean; default: boolean
+}
+export interface ModelConfigList { models: ModelConfigSummary[]; defaultModel: string }
+
+// ModelConfigInput 的 apiKey 是只写字段：保存后不会由任何 API 返回给前端。
+export interface ModelConfigInput {
+  name: string; baseUrl: string; apiKey: string; modelId: string
+  supportsImages: boolean; includeStreamUsage: boolean; default: boolean
 }
 
 // 以下模型用量类型与后端三层统计结构保持一致。

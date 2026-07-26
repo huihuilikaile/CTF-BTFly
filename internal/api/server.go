@@ -29,21 +29,22 @@ import (
 
 // Server 聚合 HTTP 层依赖，并持有可优雅关闭的标准库 HTTP Server。
 type Server struct {
-	address   string
-	token     string
-	store     *storage.Store
-	hub       *eventhub.Hub
-	agents    *agent.Service
-	sandboxes *sandbox.Manager
-	gateway   *modelgateway.Gateway
-	http      *http.Server
+	address          string
+	token            string
+	store            *storage.Store
+	hub              *eventhub.Hub
+	agents           *agent.Service
+	sandboxes        *sandbox.Manager
+	gateway          modelgateway.Manager
+	modelConfigProbe ModelConfigProbe
+	http             *http.Server
 	// requestShutdown 由 daemon 主循环提供。HTTP handler 只发出退出请求，
 	// 实际的 Server.Shutdown 统一在主循环中执行，避免 handler 等待自身退出。
 	requestShutdown func()
 }
 
 // New 注册健康检查、模型代理、受鉴权 REST API 与任务 WebSocket 路由。
-func New(address, token string, store *storage.Store, hub *eventhub.Hub, agents *agent.Service, sandboxes *sandbox.Manager, gateway *modelgateway.Gateway) *Server {
+func New(address, token string, store *storage.Store, hub *eventhub.Hub, agents *agent.Service, sandboxes *sandbox.Manager, gateway modelgateway.Manager) *Server {
 	server := &Server{address: address, token: token, store: store, hub: hub, agents: agents, sandboxes: sandboxes, gateway: gateway}
 	router := chi.NewRouter()
 	router.Use(server.cors)
@@ -59,6 +60,8 @@ func New(address, token string, store *storage.Store, hub *eventhub.Hub, agents 
 		api.Use(server.authenticate)
 		api.Get("/api/system", server.system)
 		api.Post("/api/system/model-probe", server.probeModel)
+		api.Get("/api/models/config", server.modelConfigs)
+		api.Put("/api/models/config", server.saveModelConfig)
 		api.Get("/api/settings", server.executionSettings)
 		api.Put("/api/settings", server.updateExecutionSettings)
 		api.Get("/api/model-usage", server.modelUsage)
@@ -151,17 +154,28 @@ func (s *Server) system(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"daemon":       map[string]string{"address": s.address, "version": "0.1.0"},
 		"docker":       s.sandboxes.Health(request.Context()),
-		"modelGateway": map[string]any{"configured": s.gateway.Configured(), "model": s.gateway.ModelID(), "probe": s.gateway.ProbeStatus()},
+		"modelGateway": map[string]any{"configured": s.gateway.Configured(), "model": s.gateway.ModelID(""), "probe": s.gateway.ProbeStatus(""), "defaultModel": s.gateway.DefaultProfile(), "models": s.gateway.Profiles()},
 		"scheduler":    scheduler,
 		"stack":        []string{"Wails v3", "React 19", "Tailwind CSS 4", "Go daemon", "SQLite", "Docker SDK", "Pi RPC"},
 	})
 }
 
-// probeModel 由系统概况的“刷新检测”触发。即使上游不可用也返回 200 与结构化
-// 状态，使前端可以展示 522/鉴权失败等诊断，而不是把一次预检错误当成接口故障。
+// probeModel 由系统概况的“重新读取并检测”触发。daemon 注入最新 .env 的
+// 临时探测器时，不会替换正在服务任务的 live gateway；上游失败依旧以 200 和
+// 结构化状态返回，避免将鉴权/522 等诊断伪装成平台接口故障。
 func (s *Server) probeModel(writer http.ResponseWriter, request *http.Request) {
-	_ = s.gateway.Probe(request.Context())
-	writeJSON(writer, http.StatusOK, s.gateway.ProbeStatus())
+	profile := request.URL.Query().Get("profile")
+	if s.modelConfigProbe != nil {
+		status, err := s.modelConfigProbe(request.Context(), profile)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("read latest model configuration: %w", err))
+			return
+		}
+		writeJSON(writer, http.StatusOK, ModelProbeResult{ProbeStatus: status, ConfigLoaded: true})
+		return
+	}
+	_ = s.gateway.Probe(request.Context(), profile)
+	writeJSON(writer, http.StatusOK, ModelProbeResult{ProbeStatus: s.gateway.ProbeStatus(profile)})
 }
 
 // executionSettings 返回可由用户调整的本机执行队列上限。

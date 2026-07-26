@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 	prompt TEXT NOT NULL DEFAULT '',
     target TEXT NOT NULL DEFAULT '',
     flag_format TEXT NOT NULL DEFAULT '',
+	model_profile TEXT NOT NULL DEFAULT '',
+	model_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     image TEXT NOT NULL,
     runtime TEXT NOT NULL DEFAULT '',
@@ -120,6 +122,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN handoff_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 		return fmt.Errorf("migrate task handoff: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN model_profile TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate task model profile: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN model_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("migrate task model id: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tasks_parent_task ON tasks(parent_task_id)`); err != nil {
 		return fmt.Errorf("create task parent index: %w", err)
 	}
@@ -130,11 +138,11 @@ CREATE TABLE IF NOT EXISTS app_settings (
 func (s *Store) CreateTask(ctx context.Context, task platform.Task) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO tasks (
- id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+ id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.ParentTaskID, task.HandoffID, task.Title, string(task.Category), task.Description, task.Prompt, task.Target,
-		task.FlagFormat, string(task.Status), task.Image, task.Runtime,
+		task.FlagFormat, task.ModelProfile, task.ModelID, string(task.Status), task.Image, task.Runtime,
 		task.ContainerID, task.LastError, formatTime(task.CreatedAt), formatTime(task.UpdatedAt),
 	)
 	if err != nil {
@@ -147,7 +155,7 @@ INSERT INTO tasks (
 // 主要供生命周期检查和 daemon 退出保护使用。
 func (s *Store) ListTasks(ctx context.Context) ([]platform.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
 FROM tasks ORDER BY created_at DESC`)
 	if err != nil {
@@ -171,7 +179,7 @@ FROM tasks ORDER BY created_at DESC`)
 // 但其进度通过父任务时间线呈现，不在桌面端显示为无关题目。
 func (s *Store) ListRootTasks(ctx context.Context) ([]platform.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
 FROM tasks WHERE parent_task_id = '' ORDER BY created_at DESC`)
 	if err != nil {
@@ -193,7 +201,7 @@ FROM tasks WHERE parent_task_id = '' ORDER BY created_at DESC`)
 // 该方法只供 daemon 编排和父任务工作区的协作状态展示使用，普通题目列表仍隐藏它们。
 func (s *Store) ListChildTasks(ctx context.Context, parentTaskID string) ([]platform.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
 FROM tasks WHERE parent_task_id = ? ORDER BY created_at ASC`, parentTaskID)
 	if err != nil {
@@ -228,7 +236,7 @@ WHERE status IN (?, ?, ?)`, string(platform.TaskProvisioning), string(platform.T
 // 状态时更新，后续不会被排队操作改写，因此可作为稳定的本地队列时间。
 func (s *Store) ListQueuedTasks(ctx context.Context) ([]platform.Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
 FROM tasks WHERE status = ? ORDER BY updated_at ASC, created_at ASC`, string(platform.TaskQueued))
 	if err != nil {
@@ -288,7 +296,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 // 供 API 层准确映射为 HTTP 404。
 func (s *Store) GetTask(ctx context.Context, id string) (platform.Task, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, status, image,
+SELECT id, parent_task_id, handoff_id, title, category, description, prompt, target, flag_format, model_profile, model_id, status, image,
  runtime, container_id, last_error, created_at, updated_at
 FROM tasks WHERE id = ?`, id)
 	task, err := scanTask(row)
@@ -532,7 +540,7 @@ func scanTask(row scanner) (platform.Task, error) {
 	var task platform.Task
 	var category, status, created, updated string
 	if err := row.Scan(&task.ID, &task.ParentTaskID, &task.HandoffID, &task.Title, &category, &task.Description, &task.Prompt, &task.Target,
-		&task.FlagFormat, &status, &task.Image, &task.Runtime, &task.ContainerID,
+		&task.FlagFormat, &task.ModelProfile, &task.ModelID, &status, &task.Image, &task.Runtime, &task.ContainerID,
 		&task.LastError, &created, &updated); err != nil {
 		return task, err
 	}

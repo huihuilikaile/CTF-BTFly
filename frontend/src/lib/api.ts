@@ -1,4 +1,4 @@
-import type { AttachmentInput, CreateTask, DaemonConnection, ExecutionSettings, ModelUsageReport, PlatformEvent, SystemStatus, Task, TaskPrompt, WorkspaceFile, WorkspaceFileContent, Writeup } from './types'
+import type { AttachmentInput, CreateTask, DaemonConnection, ExecutionSettings, ModelConfigInput, ModelConfigList, ModelProbeResult, ModelUsageReport, PlatformEvent, SystemStatus, Task, TaskPrompt, WorkspaceFile, WorkspaceFileContent, Writeup } from './types'
 
 // PlatformClient 封装所有 daemon REST/WebSocket 调用，并自动附加本机鉴权 Token。
 export class PlatformClient {
@@ -17,7 +17,9 @@ export class PlatformClient {
 
   // 系统、用量和任务列表属于无副作用查询。
   system = () => this.request<SystemStatus>('/api/system')
-  modelProbe = () => this.request<SystemStatus['modelGateway']['probe']>('/api/system/model-probe', { method: 'POST' })
+  modelProbe = (profile?: string) => this.request<ModelProbeResult>(`/api/system/model-probe${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`, { method: 'POST' })
+  modelConfigs = () => this.request<ModelConfigList>('/api/models/config')
+  saveModelConfig = (config: ModelConfigInput) => this.request<ModelConfigList>('/api/models/config', { method: 'PUT', body: JSON.stringify(config) })
   executionSettings = () => this.request<ExecutionSettings>('/api/settings')
   updateExecutionSettings = (settings: ExecutionSettings) => this.request<ExecutionSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(settings) })
   modelUsage = () => this.request<ModelUsageReport>('/api/model-usage')

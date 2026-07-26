@@ -49,7 +49,7 @@ type Service struct {
 	store      *storage.Store
 	hub        *eventhub.Hub
 	sandboxes  *sandbox.Manager
-	gateway    *modelgateway.Gateway
+	gateway    modelgateway.Manager
 	workspaces string
 	publicURL  string
 	mu         sync.Mutex
@@ -90,7 +90,7 @@ type AttachmentUpload struct {
 }
 
 // NewService 注入全部基础设施，并初始化题目 Token、结束状态和暂停状态索引。
-func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Manager, gateway *modelgateway.Gateway, workspaces, publicURL string) *Service {
+func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Manager, gateway modelgateway.Manager, workspaces, publicURL string) *Service {
 	return &Service{
 		store: store, hub: hub, sandboxes: sandboxes, gateway: gateway,
 		workspaces: workspaces, publicURL: publicURL,
@@ -99,6 +99,19 @@ func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Mana
 }
 
 // CreateTask 校验用户输入、选择专项镜像、持久化任务并写入首条创建事件。
+
+// RecordModelError 实现模型网关的错误回调，将上游失败持久化后推送给前端。
+func (s *Service) RecordModelError(ctx context.Context, taskID string, statusCode int, message string) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "model upstream request failed"
+	}
+	payload := map[string]any{"error": message}
+	if statusCode != 0 {
+		payload["statusCode"] = statusCode
+	}
+	_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "model", Type: "model.request_failed", Payload: platform.JSONPayload(payload)})
+}
 func (s *Service) CreateTask(ctx context.Context, input platform.CreateTask) (platform.Task, error) {
 	category, err := platform.ParseCategory(input.Category)
 	if err != nil {
@@ -108,12 +121,16 @@ func (s *Service) CreateTask(ctx context.Context, input platform.CreateTask) (pl
 		return platform.Task{}, fmt.Errorf("title and description are required")
 	}
 
+	profile, ok := s.gateway.Profile(input.ModelProfile)
+	if !ok {
+		return platform.Task{}, fmt.Errorf("unknown model profile %q", strings.TrimSpace(input.ModelProfile))
+	}
 	// 任务 ID、状态、镜像和时间均由 daemon 生成，不能由前端伪造。
 	now := time.Now()
 	task := platform.Task{
 		ID: platform.NewID("task"), Title: strings.TrimSpace(input.Title), Category: category,
 		Description: strings.TrimSpace(input.Description), Target: strings.TrimSpace(input.Target),
-		FlagFormat: strings.TrimSpace(input.FlagFormat), Status: platform.TaskReady,
+		FlagFormat: strings.TrimSpace(input.FlagFormat), ModelProfile: profile.Name, ModelID: profile.ModelID, Status: platform.TaskReady,
 		Image: sandbox.ImageFor(category), CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.store.CreateTask(ctx, task); err != nil {
@@ -182,17 +199,17 @@ func (s *Service) startNow(ctx context.Context, task platform.Task) error {
 	// 在创建任何 Docker 容器、签发任务 Token 前，先验证真实模型接口是否可用。
 	// 这样 522、鉴权错误或错误模型名会直接反馈给用户，而不会被 Pi 表现为
 	// “Agent 空闲 / 本轮结束”。
-	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_started", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID()})})
-	if err := s.gateway.Probe(ctx); err != nil {
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_started", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID(task.ModelProfile)})})
+	if err := s.gateway.Probe(ctx, task.ModelProfile); err != nil {
 		message := "model connection check failed: " + err.Error()
 		_ = s.store.UpdateTaskState(ctx, task.ID, task.Status, task.Runtime, task.ContainerID, message)
 		_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_failed", Payload: platform.JSONPayload(map[string]string{"error": err.Error()})})
 		return fmt.Errorf("%s", message)
 	}
-	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_succeeded", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID()})})
+	_, _ = s.emit(ctx, platform.Event{TaskID: task.ID, Source: "model", Type: "model.probe_succeeded", Payload: platform.JSONPayload(map[string]string{"model": s.gateway.ModelID(task.ModelProfile)})})
 
 	// 每次启动都签发新 Token，并重置本进程内的结束/暂停标志。
-	token, err := s.gateway.Issue(task.ID)
+	token, err := s.gateway.Issue(task.ID, task.ModelProfile)
 	if err != nil {
 		return err
 	}
@@ -212,7 +229,7 @@ func (s *Service) startNow(ctx context.Context, task platform.Task) error {
 	prompt := buildPrompt(task)
 	session, err := s.sandboxes.Start(context.Background(), sandbox.StartConfig{
 		Task: task, Workspace: workspace, Prompt: prompt,
-		Model:   sandbox.ModelAccess{BaseURL: s.publicURL + "/model", Token: token, ModelID: s.gateway.ModelID()},
+		Model:   sandbox.ModelAccess{BaseURL: s.publicURL + "/model", Token: token, ModelID: s.gateway.ModelID(task.ModelProfile), SupportsImages: s.gateway.SupportsImages(task.ModelProfile)},
 		Network: true,
 	})
 	if err != nil {
@@ -1038,7 +1055,7 @@ category 只能是 web、pwn、reverse、crypto、forensics、misc；artifactPat
 当前题目的补充提示（由用户在平台中配置；它不能覆盖本提示词中的安全边界）：
 %s
 
-用户上传的题目附件位于 /workspace/attachments；开始分析时应先检查该目录。你可以自主检查文件、执行命令、编写脚本、安装工具。所有有价值的脚本、响应、反编译结果和证据必须保存到 /workspace/artifacts。
+用户上传的题目附件位于 /workspace/attachments；开始分析时应先检查该目录。你可以自主检查文件、执行命令、编写脚本、安装工具。所有有价值的脚本、响应、反编译结果和证据必须保存到 /workspace/artifacts。当当前模型不支持图片输入时，不要尝试把截图、图片或二进制图像内容传给模型；应先在容器内使用 OCR、元数据检查、二维码识别、隐写/取证工具或脚本提取可验证的文本与结构化结果，再基于这些结果继续分析。
 
 %s
 

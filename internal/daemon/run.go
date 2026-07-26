@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -56,28 +55,24 @@ func Run() error {
 		return err
 	}
 	defer sandboxes.Close()
-	gateway, err := modelgateway.New(modelgateway.Config{
-		UpstreamBaseURL:    os.Getenv("CTF_UPSTREAM_MODEL_BASE_URL"),
-		UpstreamAPIKey:     os.Getenv("CTF_UPSTREAM_MODEL_API_KEY"),
-		ModelID:            os.Getenv("CTF_MODEL_ID"),
-		IncludeStreamUsage: streamUsageEnabled(os.Getenv("CTF_MODEL_INCLUDE_STREAM_USAGE")),
-	})
+	gateway, err := modelgateway.NewPool(modelPoolConfigFromEnv())
 	if err != nil {
 		return err
 	}
-	// 模型网关能观察到每次沙箱请求，因此由它统一向 SQLite 写入 Token 账本。
 	gateway.SetUsageRecorder(store)
-	// 容器通过 host.docker.internal 回连宿主机网关，端口必须与监听地址一致。
 	_, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("invalid daemon address %q: %w", address, err)
 	}
 	hub := eventhub.New()
 	agents := agent.NewService(store, hub, sandboxes, gateway, paths.Workspaces, "http://host.docker.internal:"+port)
+	gateway.SetErrorReporter(agents)
 	// HTTP 服务在后台运行；主协程同时等待服务错误或操作系统终止信号。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	server := api.New(address, token, store, hub, agents, sandboxes, gateway)
+	// “重新读取并检测”只构造临时模型池，绝不替换正在为 Agent 提供短期令牌的网关。
+	server.SetModelConfigProbe(probeLatestModelConfig)
 	// API 端点只请求主循环关闭，主循环负责统一释放 HTTP、SQLite 和 Docker 资源。
 	server.SetShutdownRequest(stop)
 	result := make(chan error, 1)
@@ -99,13 +94,34 @@ func Run() error {
 	}
 }
 
-// streamUsageEnabled 解析宽松的布尔开关；除明确的否定值外默认启用，
-// 以便从 OpenAI 兼容流式响应中获得准确用量。
-func streamUsageEnabled(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
+// modelPoolConfigFromEnv keeps startup behavior on the process environment while
+// sharing the exact multi-model parser used for a fresh .env connection probe.
+func modelPoolConfigFromEnv() modelgateway.PoolConfig {
+	return modelgateway.PoolConfigFromLookup(os.Getenv)
+}
+
+// probeLatestModelConfig reads the current .env into an isolated temporary pool.
+// It proves that a saved configuration can connect without swapping the live
+// gateway, so no running task token or in-flight model stream is interrupted.
+func probeLatestModelConfig(ctx context.Context, profile string) (modelgateway.ProbeStatus, error) {
+	path, err := envfile.ConfigFile()
+	if err != nil {
+		return modelgateway.ProbeStatus{}, err
 	}
+	values, err := envfile.Read(path)
+	if err != nil {
+		return modelgateway.ProbeStatus{}, err
+	}
+	lookup := os.Getenv
+	if _, statErr := os.Stat(path); statErr == nil {
+		lookup = func(key string) string { return values[key] }
+	} else if !os.IsNotExist(statErr) {
+		return modelgateway.ProbeStatus{}, fmt.Errorf("inspect .env file %s: %w", path, statErr)
+	}
+	pool, err := modelgateway.NewPool(modelgateway.PoolConfigFromLookup(lookup))
+	if err != nil {
+		return modelgateway.ProbeStatus{}, err
+	}
+	_ = pool.Probe(ctx, profile)
+	return pool.ProbeStatus(profile), nil
 }

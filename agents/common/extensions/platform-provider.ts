@@ -6,6 +6,7 @@ export default function registerPlatformProvider(pi: ExtensionAPI) {
   const baseUrl = process.env.CTF_MODEL_BASE_URL;
   const apiKey = process.env.CTF_TASK_TOKEN;
   const modelId = process.env.CTF_MODEL_ID ?? "ctf-reasoning";
+  const supportsImages = /^(1|true|yes|on)$/i.test(process.env.CTF_MODEL_SUPPORTS_IMAGES ?? "");
 
   // 配置不完整时不注册半可用 Provider，让 Pi 给出明确的模型缺失错误。
   if (!baseUrl || !apiKey) {
@@ -38,7 +39,7 @@ export default function registerPlatformProvider(pi: ExtensionAPI) {
           supportsDeveloperRole: false,
           supportsReasoningEffort: true,
         },
-        input: ["text", "image"],
+        input: supportsImages ? ["text", "image"] : ["text"],
         contextWindow: Number(process.env.CTF_MODEL_CONTEXT ?? 200000),
         maxTokens: Number(process.env.CTF_MODEL_MAX_TOKENS ?? 32768),
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

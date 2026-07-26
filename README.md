@@ -16,8 +16,6 @@
   </p>
 </div>
 
-图文说明:
-https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g
 
 > [!CAUTION]
 > CTF-BTFly 只能用于明确授权的 CTF 题目、靶场和安全研究环境。  
@@ -51,20 +49,20 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 ## 核心能力
 
-| 能力             | 说明                                                       |
-| ---------------- | ---------------------------------------------------------- |
-| 本地桌面工作台   | 创建题目、分类筛选、实时状态、主题切换、右键清理           |
-| 独立控制平面     | GUI 退出或隐藏后，daemon 可继续管理正在运行的任务          |
-| 一题一沙箱       | 每道题拥有独立容器、工作区、Agent 会话和短期模型 Token     |
-| 六类专项镜像     | Web、Crypto、Pwn、Reverse、Forensics、Misc                 |
-| 实时事件流       | Agent 消息、工具调用、stderr、沙箱状态和 Flag 候选统一记录 |
-| 断线重放         | SQLite 持久事件与 WebSocket 实时事件按序号合并             |
-| 附件与 Artifact  | 支持文件/文件夹上传、工作区浏览、文本预览和原文件下载      |
-| 强制中文 Writeup | Agent 必须生成可复现的 `WRITEUP.md` 和关键分析产物         |
-| Flag 提取        | 只从 `## 最终 Flag` 章节的代码块提取已验证结果             |
-| 暂停与恢复       | 保留原容器、Pi 会话和工作区，继续同一次解题上下文          |
-| 模型用量账本     | 记录请求数、输入/输出/缓存/推理 Token 和按题目/日期聚合    |
-| 受控专项交接     | 当前支持根 Misc 任务向隔离 Crypto 子任务交接密码学问题     |
+| 能力 | 说明 |
+|---|---|
+| 本地桌面工作台 | 创建题目、分类筛选、实时状态、主题切换、右键清理 |
+| 独立控制平面 | GUI 退出或隐藏后，daemon 可继续管理正在运行的任务 |
+| 一题一沙箱 | 每道题拥有独立容器、工作区、Agent 会话和短期模型 Token |
+| 六类专项镜像 | Web、Crypto、Pwn、Reverse、Forensics、Misc |
+| 实时事件流 | Agent 消息、工具调用、stderr、沙箱状态和 Flag 候选统一记录 |
+| 断线重放 | SQLite 持久事件与 WebSocket 实时事件按序号合并 |
+| 附件与 Artifact | 支持文件/文件夹上传、工作区浏览、文本预览和原文件下载 |
+| 强制中文 Writeup | Agent 必须生成可复现的 `WRITEUP.md` 和关键分析产物 |
+| Flag 提取 | 只从 `## 最终 Flag` 章节的代码块提取已验证结果 |
+| 暂停与恢复 | 保留原容器、Pi 会话和工作区，继续同一次解题上下文 |
+| 模型用量账本 | 记录请求数、输入/输出/缓存/推理 Token 和按题目/日期聚合 |
+| 受控专项协作 | 根 Agent 可按证据创建最多 3 个隔离专项子任务；支持全部六类题型，子任务结果会回传供主 Agent 复现与整合 |
 
 ## 系统架构
 
@@ -126,10 +124,25 @@ CTF_UPSTREAM_MODEL_BASE_URL=https://your-openai-compatible-endpoint/v1
 CTF_UPSTREAM_MODEL_API_KEY=your-real-provider-key
 CTF_MODEL_ID=your-model-id
 CTF_MODEL_INCLUDE_STREAM_USAGE=true
+CTF_MODEL_SUPPORTS_IMAGES=false
+# 多模型（可选）：设置 CTF_MODELS 后会优先使用以下配置，旧单模型变量仍兼容。
+CTF_MODELS=deepseek,vision
+CTF_DEFAULT_MODEL=deepseek
+CTF_MODEL_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+CTF_MODEL_DEEPSEEK_API_KEY=your-deepseek-key
+CTF_MODEL_DEEPSEEK_ID=deepseek-chat
+CTF_MODEL_DEEPSEEK_SUPPORTS_IMAGES=false
+CTF_MODEL_VISION_BASE_URL=https://your-vision-endpoint/v1
+CTF_MODEL_VISION_API_KEY=your-vision-key
+CTF_MODEL_VISION_ID=your-vision-model
+CTF_MODEL_VISION_SUPPORTS_IMAGES=true
+
 ```
 
 > [!IMPORTANT]
 > `.env` 包含真实模型密钥，不要提交到 Git、复制进 Docker 镜像或放入题目工作区。
+
+桌面端可在“系统概况 → 模型连接 → 管理模型”中新建或编辑多个配置；界面只显示 URL、模型 ID、能力开关和“密钥已设置”状态，绝不会回显 API Key。“重新读取并检测”会使用最新 `.env` 创建隔离的临时连接检测，不会影响正在运行的任务。保存后仍需重启 daemon/桌面程序，新增配置才会用于新建题目。
 
 ### 4. 构建专项镜像
 
@@ -173,18 +186,19 @@ GUI 启动时会优先连接已有 daemon；未检测到可用实例时，会自
 
 ## 模型网关配置
 
-| 环境变量                         | 必填 | 默认值             | 作用                                          |
-| -------------------------------- | ---: | ------------------ | --------------------------------------------- |
-| `CTF_UPSTREAM_MODEL_BASE_URL`    |   是 | —                  | OpenAI-compatible API 基础地址                |
-| `CTF_UPSTREAM_MODEL_API_KEY`     |   是 | —                  | 真实上游 API Key，仅 daemon 持有              |
-| `CTF_MODEL_ID`                   |   是 | —                  | Agent 使用的模型 ID                           |
-| `CTF_MODEL_INCLUDE_STREAM_USAGE` |   否 | `true`             | 为流式请求加入 `stream_options.include_usage` |
-| `CTF_AGENT_ENV_FILE`             |   否 | 程序同目录 `.env`  | 显式指定 daemon 配置文件                      |
-| `CTF_AGENT_DATA_DIR`             |   否 | 程序同目录 `data/` | 覆盖 SQLite、日志和工作区目录                 |
-| `CTF_DAEMON_ADDRESS`             |   否 | `127.0.0.1:17321`  | daemon 监听地址                               |
-| `CTF_DAEMON_TOKEN`               |   否 | 自动安全生成       | 覆盖本地控制平面 Token                        |
-| `CTF_DAEMON_EXECUTABLE`          |   否 | 自动查找           | GUI 启动的 daemon 路径                        |
-| `DOCKER_HOST`                    |   否 | Docker SDK 默认    | 指定 Docker Engine                            |
+| 环境变量 | 必填 | 默认值 | 作用 |
+|---|---:|---|---|
+| `CTF_UPSTREAM_MODEL_BASE_URL` | 是 | — | OpenAI-compatible API 基础地址 |
+| `CTF_UPSTREAM_MODEL_API_KEY` | 是 | — | 真实上游 API Key，仅 daemon 持有 |
+| `CTF_MODEL_ID` | 是 | — | Agent 使用的模型 ID |
+| `CTF_MODEL_INCLUDE_STREAM_USAGE` | 否 | `true` | 为流式请求加入 `stream_options.include_usage` |
+| `CTF_MODEL_SUPPORTS_IMAGES` | 否 | `false` | 仅在上游明确兼容 OpenAI `image_url` 内容块时设为 `true`；DeepSeek 应保持 `false` |
+| `CTF_AGENT_ENV_FILE` | 否 | 程序同目录 `.env` | 显式指定 daemon 配置文件 |
+| `CTF_AGENT_DATA_DIR` | 否 | 程序同目录 `data/` | 覆盖 SQLite、日志和工作区目录 |
+| `CTF_DAEMON_ADDRESS` | 否 | `127.0.0.1:18731` | daemon 监听地址 |
+| `CTF_DAEMON_TOKEN` | 否 | 自动安全生成 | 覆盖本地控制平面 Token |
+| `CTF_DAEMON_EXECUTABLE` | 否 | 自动查找 | GUI 启动的 daemon 路径 |
+| `DOCKER_HOST` | 否 | Docker SDK 默认 | 指定 Docker Engine |
 
 daemon 会为每次任务启动签发随机短期 Token。容器通过：
 
@@ -218,19 +232,19 @@ data/workspaces/task_xxx/
 
 ## 沙箱与安全模型
 
-| 控制项              | 当前策略                         |
-| ------------------- | -------------------------------- |
-| 默认内存            | 4 GiB                            |
-| 默认 CPU            | 4 核配额                         |
-| 默认 PID            | 512                              |
-| Linux capabilities  | 默认全部移除                     |
-| Pwn 额外能力        | `SYS_PTRACE`                     |
-| `no-new-privileges` | 启用                             |
-| Docker Socket       | 不挂载                           |
-| 宿主机目录          | 只挂载当前题目工作区             |
-| 模型凭据            | 容器只获得任务级短期 Token       |
-| 普通题运行时        | 优先 gVisor，开发环境可降级 runc |
-| Pwn 运行时          | 优先 Kata，开发环境可降级 runc   |
+| 控制项 | 当前策略 |
+|---|---|
+| 默认内存 | 4 GiB |
+| 默认 CPU | 4 核配额 |
+| 默认 PID | 512 |
+| Linux capabilities | 默认全部移除 |
+| Pwn 额外能力 | `SYS_PTRACE` |
+| `no-new-privileges` | 启用 |
+| Docker Socket | 不挂载 |
+| 宿主机目录 | 只挂载当前题目工作区 |
+| 模型凭据 | 容器只获得任务级短期 Token |
+| 普通题运行时 | 优先 gVisor，开发环境可降级 runc |
+| Pwn 运行时 | 优先 Kata，开发环境可降级 runc |
 
 > [!WARNING]
 > 当前实现仍使用 Docker bridge 网络，尚未在网络层强制目标白名单。  
@@ -240,14 +254,14 @@ data/workspaces/task_xxx/
 
 ## 题型与专项镜像
 
-| 题型      | 镜像                           | 代表工具                                      | 目标运行时  |
-| --------- | ------------------------------ | --------------------------------------------- | ----------- |
-| Web       | `ctf-agent-pi-web:0.1.0`       | Nmap、SQLMap、Gobuster、WhatWeb               | gVisor      |
-| Crypto    | `ctf-agent-pi-crypto:0.1.0`    | John、gmpy2、PyCryptodome、SymPy、Z3          | gVisor      |
-| Pwn       | `ctf-agent-pi-pwn:0.1.0`       | GDB、QEMU、Pwntools、Ropper、Checksec         | Kata/VM     |
-| Reverse   | `ctf-agent-pi-reverse:0.1.0`   | Apktool、angr、GDB、Strace、Ltrace            | gVisor/Kata |
+| 题型 | 镜像 | 代表工具 | 目标运行时 |
+|---|---|---|---|
+| Web | `ctf-agent-pi-web:0.1.0` | Nmap、SQLMap、Gobuster、WhatWeb | gVisor |
+| Crypto | `ctf-agent-pi-crypto:0.1.0` | John、gmpy2、PyCryptodome、SymPy、Z3 | gVisor |
+| Pwn | `ctf-agent-pi-pwn:0.1.0` | GDB、QEMU、Pwntools、Ropper、Checksec | Kata/VM |
+| Reverse | `ctf-agent-pi-reverse:0.1.0` | Apktool、angr、GDB、Strace、Ltrace | gVisor/Kata |
 | Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility | gVisor/Kata |
-| Misc      | `ctf-agent-pi-misc:0.1.0`      | FFmpeg、ImageMagick、Steghide、ZBar、SciPy    | gVisor      |
+| Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy | gVisor |
 
 镜像详细说明见 [`images/README.md`](./images/README.md)。
 
@@ -262,7 +276,7 @@ CTFAgentPi/
 ├── frontend/                React + TypeScript + Tailwind 桌面前端
 ├── images/                  基础与六类专项 Docker 镜像
 ├── internal/
-│   ├── agent/               任务编排、Pi RPC、Flag 与专项交接
+│   ├── agent/               任务编排、Pi RPC、Flag 与受控专项协作
 │   ├── api/                 REST、WebSocket、鉴权、上传和下载
 │   ├── appdata/             数据目录、连接文件和 daemon Token
 │   ├── daemon/              控制平面依赖装配与生命周期
@@ -317,6 +331,14 @@ wails3 build
 ## 当前限制
 
 - Windows 是当前主要支持平台，其他 Wails 平台尚未完成 CTF 工具链验证；
+- Docker bridge 网络尚未强制授权目标白名单；
+- gVisor/Kata 不可用时会回退 runc 开发模式；
+- “终端”页是 Pi 工具输出转录，不是交互式 PTY；
+- 每个根任务整个生命周期最多可创建 3 个子 Agent；子任务不能继续委派，最终判断与 Writeup 始终由根 Agent 负责；
+- daemon 异常重启后的活跃任务状态恢复仍需完善；
+- 工作区、事件和模型流式缓冲仍需增加更完整的配额边界；
+- 仓库当前未包含 `LICENSE` 文件，公开分发前应由维护者明确许可证。
+
 ## 最后
 
 欢迎交流:921416626

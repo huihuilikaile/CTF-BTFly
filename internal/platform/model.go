@@ -70,6 +70,8 @@ type Task struct {
 	Prompt       string     `json:"prompt"`
 	Target       string     `json:"target,omitempty"`
 	FlagFormat   string     `json:"flagFormat,omitempty"`
+	ModelProfile string     `json:"modelProfile,omitempty"`
+	ModelID      string     `json:"modelId,omitempty"`
 	Status       TaskStatus `json:"status"`
 	Image        string     `json:"image"`
 	Runtime      string     `json:"runtime,omitempty"`
@@ -121,11 +123,12 @@ type SchedulerStatus struct {
 // CreateTask 是创建 API 接受的用户输入，不允许调用方直接指定状态、
 // 镜像、容器 ID 等受 daemon 控制的字段。
 type CreateTask struct {
-	Title       string `json:"title"`
-	Category    string `json:"category"`
-	Description string `json:"description"`
-	Target      string `json:"target,omitempty"`
-	FlagFormat  string `json:"flagFormat,omitempty"`
+	Title        string `json:"title"`
+	Category     string `json:"category"`
+	Description  string `json:"description"`
+	Target       string `json:"target,omitempty"`
+	FlagFormat   string `json:"flagFormat,omitempty"`
+	ModelProfile string `json:"modelProfile,omitempty"`
 }
 
 // Event 是统一、可重放的事件记录；Sequence 在单个任务内严格递增。

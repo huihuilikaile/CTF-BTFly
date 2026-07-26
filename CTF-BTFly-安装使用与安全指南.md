@@ -96,6 +96,19 @@ CTF_MODEL_ID=your-model-id
 # 可选，默认 true：为 OpenAI 兼容的流式响应请求最终 usage 数据。
 # 若上游明确报错不支持 stream_options，可改为 false。
 CTF_MODEL_INCLUDE_STREAM_USAGE=true
+CTF_MODEL_SUPPORTS_IMAGES=false
+# 多模型（可选）：设置 CTF_MODELS 后会优先使用以下配置，旧单模型变量仍兼容。
+CTF_MODELS=deepseek,vision
+CTF_DEFAULT_MODEL=deepseek
+CTF_MODEL_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+CTF_MODEL_DEEPSEEK_API_KEY=your-deepseek-key
+CTF_MODEL_DEEPSEEK_ID=deepseek-chat
+CTF_MODEL_DEEPSEEK_SUPPORTS_IMAGES=false
+CTF_MODEL_VISION_BASE_URL=https://your-vision-endpoint/v1
+CTF_MODEL_VISION_API_KEY=your-vision-key
+CTF_MODEL_VISION_ID=your-vision-model
+CTF_MODEL_VISION_SUPPORTS_IMAGES=true
+
 ```
 
 示例文件路径：
@@ -104,9 +117,11 @@ CTF_MODEL_INCLUDE_STREAM_USAGE=true
 bin/.env
 ```
 
-修改 `.env` 后，需要完全退出 CTF-BTFly 与 daemon，再重新启动 `CTF-BTFly.exe`。如果界面提示“尚未配置模型网关”，应先检查以上三个变量是否存在、没有多余引号，并确认上游地址和模型 ID 正确。
+可在“系统概况 → 模型连接 → 管理模型”中新增或编辑 `.env` 模型配置；真实 API Key 仅可写入，本机界面不会回显。保存后会自动用最新 `.env` 发起隔离连接检测，不会影响正在运行的任务；要让新配置用于创建题目，仍需要完全退出 CTF-BTFly 与 daemon，再重新启动 `CTF-BTFly.exe`。如果界面提示“尚未配置模型网关”，应先检查以上三个变量是否存在、没有多余引号，并确认上游地址和模型 ID 正确。
 
 `CTF_MODEL_INCLUDE_STREAM_USAGE` 默认开启。它会让标准 OpenAI 兼容的 `/chat/completions` 流式请求在结束时返回 `usage`，用于统计输入、输出和总 Token；不会改变题目、Prompt 或真实 API Key。少数兼容服务若拒绝 `stream_options`，才需要设置为 `false`。
+
+`CTF_MODEL_SUPPORTS_IMAGES` 默认关闭。关闭时 Pi 不会向模型发送 OpenAI 风格的 `image_url` 内容块；Agent 会保留图片文件，并优先使用容器内 OCR、元数据、二维码识别或取证工具把可验证文本交给模型。DeepSeek 等文本模型应保持 `false`；只有已经验证支持视觉输入的上游模型才设置为 `true`。若模型仍返回 4xx/5xx，任务时间线会以“模型请求失败”显示状态码和经过截断的供应商错误详情。
 
 ### 5.3 构建镜像
 
@@ -204,17 +219,17 @@ Agent 应将有效脚本保存到 `/workspace/artifacts`，并将最终报告写
 
 暂停不是对 Linux 进程做无限期冻结：当前 Pi 操作会被取消，因此正在执行的工具命令可能中断。恢复会继续同一会话。若暂停期间 daemon 被完全退出，原 Pi 会话可能无法恢复；此时应保留补充提示并选择“重新尝试”。
 
-### 6.6 杂项题与 Crypto 专项交接
+### 6.6 受控专项子 Agent 协作
 
-Misc Agent 遇到核心密码学阻塞时，可以保存参数、样本与当前发现，并请求独立 Crypto 子任务分析。系统会：
+根 Agent 在完成初步判断后，如发现多个可独立验证的方向、不同附件需要不同专项工具，或主线存在明确的专项阻塞，可创建边界清晰的子任务。子任务可选择 Web、Crypto、Pwn、Reverse、Forensics 或 Misc 任一题型；每个根任务在整个生命周期最多创建 3 个，子 Agent 不可继续委派。
 
-1. 关闭等待中的 Misc 容器，减少同时占用的内存；
-2. 创建隔离的 Crypto 子容器；
-3. 仅复制必要附件与 Artifact；
-4. 将专项脚本和报告回写到父题目的 `artifacts/handoffs/`；
-5. 自动恢复 Misc Agent 继续完成原题。
+1. 归档根 Agent 写入的子任务请求，并创建隔离的专项子容器；
+2. 复制原题附件，以及请求中明确列出的普通 Artifact；
+3. 保留根 Agent 的原容器与 Pi 会话，让它立即继续自己的主线，而不是等待子任务；
+4. 在子任务结束时关闭其容器，并将报告、Artifact 与 `result.json` 回写到父题目的 `artifacts/subtasks/<handoffId>/`；
+5. 主动把结果通知根 Agent，由根 Agent 复现、交叉验证、整合并完成原题 Writeup。
 
-这不是通用无限多 Agent 调度。子容器仍应仅处理授权题目范围内的问题。
+这不是无限制的多 Agent 调度：调度器仍统一执行全局并发限制，且所有子任务只能处理原题的明确授权范围。
 
 ### 6.7 完成、复盘与释放资源
 
@@ -233,7 +248,7 @@ Misc Agent 遇到核心密码学阻塞时，可以保存参数、样本与当前
 - **总览**：输入 Token、输出 Token、总 Token 与请求数；
 - **按日期 Token 用量**：最近 30 天的柱状图，鼠标悬停可查看当天输入、输出、总量与请求数；
 - **按题目统计**：每道题目的输入、输出、总 Token、请求数和实际模型名称；
-- **专项交接**：Misc 调用 Crypto 子任务时，子任务用量会合并显示在原 Misc 题目下。
+- **专项协作**：任意子任务的用量都会自动归并显示在其可见的根题目下。
 
 统计由本地模型网关在上游响应完成后写入 `data/platform.db`。它不保存 Prompt、模型回复、附件、真实 API Key 或完整请求头。只有模型服务商返回 `usage` 时，Token 才会计入；未返回 `usage` 的调用仍会显示在请求数中，但不会被估算为不准确的 Token 数。旧版本运行过的历史题目不会自动补算。
 

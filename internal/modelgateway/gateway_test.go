@@ -175,3 +175,47 @@ func TestEnsureStreamUsageAddsOpenAICompatibleOption(t *testing.T) {
 		t.Fatalf("stream usage option was not added: %s", body)
 	}
 }
+
+type errorSink struct {
+	taskID     string
+	statusCode int
+	message    string
+}
+
+func (sink *errorSink) RecordModelError(_ context.Context, taskID string, statusCode int, message string) {
+	sink.taskID, sink.statusCode, sink.message = taskID, statusCode, message
+}
+
+// TestGatewayReportsUpstreamModelErrors 验证供应商 4xx 会成为可显示的任务错误，
+// 并保留 DeepSeek 返回的 image_url 兼容性说明。
+func TestGatewayReportsUpstreamModelErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"message":"unknown variant image_url"}}`))
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "upstream-secret", ModelID: "text-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &errorSink{}
+	gateway.SetErrorReporter(sink)
+	token, err := gateway.Issue("task_image_error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/model/chat/completions", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status %d", response.Code)
+	}
+	if sink.taskID != "task_image_error" || sink.statusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected error event %#v", sink)
+	}
+	if !strings.Contains(sink.message, "image_url") {
+		t.Fatalf("missing upstream error detail %q", sink.message)
+	}
+}

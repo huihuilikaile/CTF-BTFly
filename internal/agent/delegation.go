@@ -187,7 +187,7 @@ func (s *Service) startRequestedSubtasks(parent platform.Task) bool {
 			ID: platform.NewID("task"), ParentTaskID: parent.ID, HandoffID: handoffID,
 			Title: parent.Title + " · " + title, Category: category,
 			Description: subtaskDescription(parent, category, request), Prompt: subtaskPrompt(category, request),
-			Target: parent.Target, FlagFormat: parent.FlagFormat, Status: platform.TaskReady,
+			Target: parent.Target, FlagFormat: parent.FlagFormat, ModelProfile: parent.ModelProfile, ModelID: parent.ModelID, Status: platform.TaskReady,
 			Image: sandbox.ImageFor(category), CreatedAt: now, UpdatedAt: now,
 		}
 		if err := s.store.CreateTask(context.Background(), child); err != nil {

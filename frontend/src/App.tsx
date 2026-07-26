@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { DesktopService } from '../bindings/github.com/ctfagentpi/ctfagentpi'
 import { PlatformClient } from './lib/api'
-import type { AttachmentInput, Category, CreateTask, DaemonConnection, ExecutionSettings, PlatformEvent, SchedulerStatus, Task, TaskStatus, WorkspaceFile, WorkspaceFileContent, Writeup } from './lib/types'
+import type { AttachmentInput, Category, CreateTask, DaemonConnection, ExecutionSettings, ModelConfigInput, ModelConfigSummary, ModelProbeResult, ModelProfileStatus, PlatformEvent, SchedulerStatus, Task, TaskStatus, WorkspaceFile, WorkspaceFileContent, Writeup } from './lib/types'
 import { useTaskEvents } from './lib/useTaskEvents'
 import { cn, eventText } from './lib/utils'
 import { Button } from './components/ui/button'
@@ -97,6 +97,7 @@ const eventLabels: Record<string, string> = {
   'model.probe_started': '正在检测模型连接',
   'model.probe_succeeded': '模型连接正常',
   'model.probe_failed': '模型连接不可用',
+  'model.request_failed': '模型请求失败',
   'delegation.started': '已启动子 Agent 协作',
   'delegation.parent_continues': '主 Agent 正在并行继续解题',
   'delegation.parent_waiting': '主 Agent 保留会话等待子 Agent 结果',
@@ -116,7 +117,7 @@ const eventLabels: Record<string, string> = {
   'agent.thinking.delta': '推理片段',
   'agent.retrying': '模型请求重试',
   'agent.compacting': '正在压缩上下文',
-  'agent.extension_error': '扩展异常',
+  'agent.extension_error': '模型/扩展异常',
   'agent.protocol_error': 'Pi 协议异常',
   'agent.stream_error': 'Pi 事件流中断',
   'agent.stderr': 'Agent 标准错误',
@@ -302,7 +303,7 @@ function App() {
         {/* 主区域根据导航状态选择工作区、概况、安全、用量或筛选列表。 */}
         <main className="min-w-0 flex-1">
           {activeView === 'task' && selected ? (
-            <TaskWorkspace client={client!} task={selected} events={stream.events} socketConnected={stream.connected} scheduler={system.data?.scheduler}
+            <TaskWorkspace client={client!} task={selected} events={stream.events} socketConnected={stream.connected} scheduler={system.data?.scheduler} models={system.data?.modelGateway.models ?? []}
               onStart={() => startTask.mutate(selected.id)} onAbort={() => abortTask.mutate(selected.id)} onPause={() => pauseTask.mutate(selected.id)} onResume={() => resumeTask.mutate(selected.id)} onCloseSandbox={() => setConfirmation({ kind: 'closeSandbox', task: selected })}
               actionError={displayError(String(startTask.error ?? abortTask.error ?? pauseTask.error ?? resumeTask.error ?? closeSandbox.error ?? ''))} />
           ) : activeView === 'overview' || activeView === 'task' ? <Overview client={client!} system={system.data} tasks={tasks.data ?? []} onCreate={() => setShowCreate(true)} onRefreshSystem={() => { void system.refetch() }} />
@@ -320,7 +321,7 @@ function App() {
       </footer>
 
       {/* 弹窗和浮层统一放在根节点尾部，避免受主布局 overflow 限制。 */}
-      {showCreate && <CreateDialog pending={createTask.isPending} error={displayError(String(createTask.error ?? ''))} onClose={() => setShowCreate(false)} onSubmit={(task, attachments) => createTask.mutate({ task, attachments })} />}
+      {showCreate && <CreateDialog models={system.data?.modelGateway.models ?? []} defaultModel={system.data?.modelGateway.defaultModel} pending={createTask.isPending} error={displayError(String(createTask.error ?? ''))} onClose={() => setShowCreate(false)} onSubmit={(task, attachments) => createTask.mutate({ task, attachments })} />}
       {taskMenu && <TaskContextMenu task={taskMenu.task} x={taskMenu.x} y={taskMenu.y} pending={deleteTask.isPending} onClose={() => setTaskMenu(null)} onRequestDelete={() => { setConfirmation({ kind: 'delete', task: taskMenu.task }); setTaskMenu(null) }} />}
       {confirmation && <ConfirmationDialog request={confirmation} pending={confirmation.kind === 'delete' ? deleteTask.isPending : closeSandbox.isPending} onCancel={() => setConfirmation(null)} onConfirm={confirmAction} />}
 		{showSettings && <ThemeSettings theme={theme} onChange={setTheme} scheduler={system.data?.scheduler} saving={updateExecutionSettings.isPending} error={updateExecutionSettings.error ? displayError(String(updateExecutionSettings.error)) : ''} onUpdateConcurrentTasks={maxConcurrentTasks => updateExecutionSettings.mutate({ maxConcurrentTasks })} onClose={() => setShowSettings(false)} />}
@@ -364,14 +365,10 @@ function Overview({ client, system, tasks, onCreate, onRefreshSystem }: { client
   const activeContainers = tasks.filter(task => !!task.containerId)
 	const scheduler = system?.scheduler
   const model = system?.modelGateway
-  const probe = model?.probe
-  const probeModel = useMutation({ mutationFn: () => client.modelProbe(), onSuccess: onRefreshSystem })
-  const probeState = !model?.configured ? '未配置' : !probe?.checkedAt ? '未检测' : probe.available ? '连接正常' : '连接失败'
-  const probeAccent = !model?.configured ? 'text-amber-300' : !probe?.checkedAt ? 'text-slate-400' : probe.available ? 'text-emerald-300' : 'text-red-300'
   return <div className="panel-grid h-full overflow-y-auto p-6">
     <div className="mx-auto max-w-6xl"><div className="mb-6 flex items-end justify-between"><div><div className="mb-1 text-xs font-medium text-sky-400">本地控制平面</div><h1 className="text-2xl font-semibold tracking-tight">系统概况</h1><p className="mt-1 text-sm text-slate-500">每道题都使用独立、可销毁的 Pi 沙箱；容器外由控制平面统一管理。</p></div><Button variant="primary" onClick={onCreate}><Plus size={14} /> 创建题目</Button></div>
       <div className="grid grid-cols-5 gap-3"><Stat icon={Activity} label="运行中" value={`${scheduler?.activeTaskCount ?? running} / ${scheduler?.settings.maxConcurrentTasks ?? 5}`} accent="text-sky-300" /><Stat icon={Clock3} label="排队中" value={scheduler?.queuedTaskCount ?? 0} accent="text-violet-300" /><Stat icon={ShieldCheck} label="已稳定" value={settled} accent="text-emerald-300" /><Stat icon={Boxes} label="镜像" value="6" accent="text-violet-300" /><Stat icon={Cpu} label="Docker" value={system?.docker.serverVersion ?? '—'} accent="text-amber-300" small /></div>
-      <section className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-[#0d131b]/95"><div className="flex items-center gap-3 border-b border-slate-800 px-4 py-3"><div className="grid size-8 place-items-center rounded-md bg-sky-400/10 text-sky-300"><BrainCircuit size={16} /></div><div className="min-w-0 flex-1"><div className="text-xs font-medium text-slate-200">模型连接</div><div className="mt-0.5 text-[10px] text-slate-500">真实请求当前模型接口；不会创建题目容器。</div></div><Button variant="secondary" disabled={probeModel.isPending} onClick={() => probeModel.mutate()}>{probeModel.isPending ? <RefreshCw size={13} className="animate-spin" /> : <RefreshCw size={13} />} 刷新检测</Button></div><div className="grid grid-cols-[minmax(0,1fr)_150px] gap-4 p-4 text-xs"><div className="min-w-0"><div className="text-[10px] text-slate-500">当前模型</div><div className="mono mt-1 truncate text-sm text-sky-200">{model?.configured ? model.model || '未指定' : '未配置'}</div><div className="mt-2 text-[10px] text-slate-600">{probe?.checkedAt ? `最近检测：${new Date(probe.checkedAt).toLocaleString()}` : '尚未进行模型连通性检测'}</div></div><div className="border-l border-slate-800 pl-4"><div className="text-[10px] text-slate-500">连接状态</div><div className={cn('mt-1 text-sm font-medium', probeAccent)}>{probeState}</div></div></div>{probe?.error && <div className="border-t border-red-500/20 bg-red-500/5 px-4 py-3 text-xs leading-5 text-red-200">{probe.error}</div>}</section>
+            <ModelConnectionPanel client={client} model={model} onRefreshSystem={onRefreshSystem} />
       <div className="mt-5 grid grid-cols-[1.4fr_1fr] gap-4">
         <section className="rounded-lg border border-slate-800 bg-[#0d131b]/95"><SectionTitle icon={Network} title="执行链路" subtitle="每一层都有可追踪事件" /><div className="grid grid-cols-4 gap-2 p-4"><PipelineStep icon={LayoutDashboard} label="Wails 桌面端" detail="React 19" /><PipelineStep icon={Server} label="Go 后端" detail="REST + WS" /><PipelineStep icon={Container} label="沙箱" detail="Docker SDK" /><PipelineStep icon={Bot} label="Pi Agent" detail="JSONL RPC" /></div></section>
         <section className="rounded-lg border border-slate-800 bg-[#0d131b]/95"><SectionTitle icon={ShieldCheck} title="隔离状态" subtitle="运行时探测" /><div className="space-y-3 p-4 text-xs"><RuntimeRow label="普通题" value={system?.docker.normalRuntime ?? '检测中'} preferred="gVisor" /><RuntimeRow label="Pwn 题" value={system?.docker.pwnRuntime ?? '检测中'} preferred="Kata/VM" />{system?.docker.isolationWarnings?.map(warning => <div key={warning} className="flex gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-2.5 text-amber-200/80"><TriangleAlert size={14} className="shrink-0" />{runtimeWarning(warning)}</div>)}</div></section>
@@ -383,6 +380,89 @@ function Overview({ client, system, tasks, onCreate, onRefreshSystem }: { client
   </div>
 }
 
+// ModelConnectionPanel 将 live daemon 模型摘要与一次性的最新 .env 探测分开显示：
+// 探测配置绝不替换任务正在使用的网关，避免短期令牌失效。
+function ModelConnectionPanel({ client, model, onRefreshSystem }: { client: PlatformClient; model?: Awaited<ReturnType<PlatformClient['system']>>['modelGateway']; onRefreshSystem: () => void }) {
+  const [selectedProfile, setSelectedProfile] = useState('')
+  const [showManager, setShowManager] = useState(false)
+  const [lastProbe, setLastProbe] = useState<{ profile: string; result: ModelProbeResult }>()
+  const selectedModel = model?.models.find(item => item.name === selectedProfile) ?? model?.models.find(item => item.name === model.defaultModel) ?? model?.models[0]
+  const hasFreshProbe = lastProbe?.profile === (selectedModel?.name ?? '')
+  const probe = hasFreshProbe ? lastProbe?.result : selectedModel?.probe ?? model?.probe
+  const configured = hasFreshProbe ? probe?.configured : selectedModel?.configured
+  const probeModel = useMutation({
+    mutationFn: () => client.modelProbe(selectedModel?.name),
+    onSuccess: result => { setLastProbe({ profile: selectedModel?.name ?? '', result }); onRefreshSystem() },
+  })
+  const probeState = !configured ? '未配置' : !probe?.checkedAt ? '未检测' : probe.available ? '连接正常' : '连接失败'
+  const probeAccent = !configured ? 'text-amber-300' : !probe?.checkedAt ? 'text-slate-400' : probe.available ? 'text-emerald-300' : 'text-red-300'
+
+  return <><section className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-[#0d131b]/95"><div className="flex items-center gap-3 border-b border-slate-800 px-4 py-3"><div className="grid size-8 place-items-center rounded-md bg-sky-400/10 text-sky-300"><BrainCircuit size={16} /></div><div className="min-w-0 flex-1"><div className="text-xs font-medium text-slate-200">模型连接</div><div className="mt-0.5 text-[10px] text-slate-500">检测会临时读取最新 .env；不会创建容器，也不会切换运行中任务的模型。</div></div><Button variant="secondary" onClick={() => setShowManager(true)}><Settings size={13} /> 管理模型</Button><Button variant="secondary" disabled={probeModel.isPending} onClick={() => probeModel.mutate()}>{probeModel.isPending ? <RefreshCw size={13} className="animate-spin" /> : <RefreshCw size={13} />} 重新读取并检测</Button></div><div className="grid grid-cols-[minmax(0,1fr)_150px] gap-4 p-4 text-xs"><div className="min-w-0"><div className="text-[10px] text-slate-500">当前检测模型</div><select value={selectedModel?.name ?? ''} onChange={event => { setSelectedProfile(event.target.value); setLastProbe(undefined) }} className="mono mt-1 w-full rounded border border-slate-700 bg-[#090e14] px-2 py-1 text-sm text-sky-200 outline-none focus:border-sky-500/60">{model?.models.map(item => <option key={item.name} value={item.name}>{item.name} · {item.modelId} · {item.supportsImages ? '支持图片识别' : '仅文本'}</option>)}</select><div className="mt-2 text-[10px] text-slate-600">{probe?.checkedAt ? `最近检测：${new Date(probe.checkedAt).toLocaleString()}` : '尚未进行模型连通性检测'}</div></div><div className="border-l border-slate-800 pl-4"><div className="text-[10px] text-slate-500">连接状态</div><div className={cn('mt-1 text-sm font-medium', probeAccent)}>{probeState}</div></div></div>{hasFreshProbe && <div className="border-t border-sky-500/15 bg-sky-500/5 px-4 py-2 text-[10px] leading-4 text-sky-100/75">本次结果来自最新 .env 的隔离检测。保存的新模型会在重启 daemon 后用于创建任务，现有任务不会受到影响。</div>}{probe?.error && <div className="border-t border-red-500/20 bg-red-500/5 px-4 py-3 text-xs leading-5 text-red-200">{probe.error}</div>}<div className="border-t border-slate-800 px-4 py-3"><div className="mb-2 text-[10px] text-slate-500">当前 daemon 已加载的模型</div><div className="grid gap-2 sm:grid-cols-2">{model?.models.map(item => <div key={item.name} className="min-w-0 rounded border border-slate-800 bg-[#090e14] px-3 py-2"><div className="flex items-center gap-2"><span className="mono truncate text-xs text-sky-200">{item.name}</span>{item.default && <span className="rounded border border-sky-400/20 bg-sky-400/5 px-1.5 py-0.5 text-[9px] text-sky-200">默认</span>}<span className={cn('ml-auto size-1.5 shrink-0 rounded-full', item.probe.available ? 'bg-emerald-400' : item.probe.checkedAt ? 'bg-red-400' : 'bg-slate-600')} /></div><div className="mono mt-1 truncate text-[10px] text-slate-500">{item.baseUrl || '未设置 URL'} · {item.modelId || '未设置 ID'}</div><div className="mt-1 flex flex-wrap gap-x-2 text-[9px] text-slate-600"><span>{item.supportsImages ? '支持图片识别' : '仅文本'}</span><span>{item.hasApiKey ? '密钥已设置' : '缺少密钥'}</span><span>{item.includeStreamUsage ? '回传用量' : '不回传用量'}</span></div></div>)}{!model?.models.length && <div className="text-[10px] text-slate-600">当前 daemon 尚未加载模型。可通过“管理模型”创建 .env 配置。</div>}</div></div></section>{showManager && <ModelConfigDialog client={client} onClose={() => setShowManager(false)} onUpdated={onRefreshSystem} />}</>
+}
+
+// ModelConfigDialog 仅展示模型摘要；API Key 是一次性写入字段，编辑已有模型时留空即可保留。
+function ModelConfigDialog({ client, onClose, onUpdated }: { client: PlatformClient; onClose: () => void; onUpdated: () => void }) {
+  const empty = (): ModelConfigInput => ({ name: '', baseUrl: '', apiKey: '', modelId: '', supportsImages: false, includeStreamUsage: true, default: false })
+  const saved = useQuery({ queryKey: ['model-config'], queryFn: () => client.modelConfigs(), refetchOnWindowFocus: false })
+  const [form, setForm] = useState<ModelConfigInput>(empty)
+  const [editingName, setEditingName] = useState<string>()
+  const [notice, setNotice] = useState('')
+  const current = saved.data?.models.find(item => item.name === editingName)
+  const save = useMutation({
+    mutationFn: async (value: ModelConfigInput) => ({ saved: await client.saveModelConfig(value), probe: await client.modelProbe(value.name) }),
+    onSuccess: ({ probe }) => { setNotice(probe.available ? '配置已写入 .env，且最新配置检测通过。重启 daemon 后可用于创建任务。' : `配置已写入 .env，但检测失败：${probe.error || '请检查连接信息'}。`); void saved.refetch(); onUpdated() },
+  })
+  const edit = (item: ModelConfigSummary) => { setEditingName(item.name); setNotice(''); setForm({ name: item.name, baseUrl: item.baseUrl, apiKey: '', modelId: item.modelId, supportsImages: item.supportsImages, includeStreamUsage: item.includeStreamUsage, default: item.default }) }
+  const create = () => { setEditingName(undefined); setNotice(''); setForm(empty()) }
+  const submit = (event: FormEvent) => { event.preventDefault(); save.mutate(form) }
+  const error = save.error ? displayError(String(save.error)) : saved.error ? displayError(String(saved.error)) : ''
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm" onMouseDown={event => event.target === event.currentTarget && onClose()}>
+      <form onSubmit={submit} className="my-4 flex w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-slate-700 bg-[#0e151e] shadow-2xl shadow-black/60">
+        <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+          <div><h2 className="text-sm font-semibold">模型配置</h2><p className="mt-1 text-xs text-slate-500">URL、模型 ID 与能力开关写入程序同目录 .env；真实 API Key 只可写入，永不回显。</p></div>
+          <button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-800"><X size={16} /></button>
+        </div>
+        <div className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="border-r border-slate-800 bg-[#0b1118] p-3">
+            <div className="mb-2 flex items-center justify-between text-[10px] text-slate-500"><span>已保存配置</span><button type="button" onClick={create} className="text-sky-300 hover:text-sky-200">+ 新增</button></div>
+            <div className="max-h-[440px] space-y-1 overflow-y-auto">
+              {saved.isLoading && <div className="p-2 text-[10px] text-slate-600">正在读取 .env…</div>}
+              {saved.data?.models.map(item => (
+                <button key={item.name} type="button" onClick={() => edit(item)} className={cn('w-full rounded border p-2 text-left transition-colors', editingName === item.name ? 'border-sky-400/40 bg-sky-400/10' : 'border-slate-800 bg-[#090e14] hover:border-slate-700')}>
+                  <div className="flex items-center gap-1.5"><span className="mono truncate text-[11px] text-slate-200">{item.name}</span>{item.default && <span className="text-[9px] text-sky-300">默认</span>}</div>
+                  <div className="mono mt-1 truncate text-[9px] text-slate-600">{item.modelId || '未设置 ID'}</div>
+                  <div className="mt-1 text-[9px] text-slate-600">{item.supportsImages ? '支持图片' : '仅文本'} · {item.hasApiKey ? '密钥已设置' : '缺少密钥'}</div>
+                </button>
+              ))}
+            </div>
+          </aside>
+          <div className="max-h-[500px] overflow-y-auto p-5">
+            <div className="mb-4 flex items-center gap-2"><div className="text-xs font-medium text-slate-200">{editingName ? `编辑 ${editingName}` : '新增模型'}</div>{editingName && <button type="button" onClick={create} className="text-[10px] text-slate-500 hover:text-sky-300">切换为新增</button>}</div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="配置名称"><input required disabled={!!editingName} value={form.name} onChange={event => setForm({ ...form, name: event.target.value.toLowerCase() })} className="input mono disabled:cursor-not-allowed disabled:opacity-60" placeholder="deepseek / qwen-vl" pattern="[a-z][a-z0-9-]{0,31}" /></Field>
+              <Field label="模型 ID"><input required value={form.modelId} onChange={event => setForm({ ...form, modelId: event.target.value })} className="input mono" placeholder="deepseek-chat" /></Field>
+            </div>
+            <Field label="OpenAI 兼容 Base URL"><input required type="url" value={form.baseUrl} onChange={event => setForm({ ...form, baseUrl: event.target.value })} className="input mono" placeholder="https://api.example.com/v1" /></Field>
+            <Field label={current?.hasApiKey ? 'API Key（留空则保留）' : 'API Key'}><input required={!current?.hasApiKey} type="password" autoComplete="new-password" value={form.apiKey} onChange={event => setForm({ ...form, apiKey: event.target.value })} className="input mono" placeholder={current?.hasApiKey ? '留空即可保留现有密钥' : '仅写入本机 .env，不会再次显示'} /></Field>
+            <div className="grid grid-cols-3 gap-2">
+              <label className="flex cursor-pointer items-center gap-2 rounded border border-slate-800 bg-[#090e14] p-2 text-[10px] text-slate-400"><input type="checkbox" checked={form.supportsImages} onChange={event => setForm({ ...form, supportsImages: event.target.checked })} /> 支持图片识别</label>
+              <label className="flex cursor-pointer items-center gap-2 rounded border border-slate-800 bg-[#090e14] p-2 text-[10px] text-slate-400"><input type="checkbox" checked={form.includeStreamUsage} onChange={event => setForm({ ...form, includeStreamUsage: event.target.checked })} /> 请求用量</label>
+              <label className="flex cursor-pointer items-center gap-2 rounded border border-slate-800 bg-[#090e14] p-2 text-[10px] text-slate-400"><input type="checkbox" checked={form.default} onChange={event => setForm({ ...form, default: event.target.checked })} /> 设为默认</label>
+            </div>
+            {notice && <div className={cn('mt-4 rounded border p-2 text-xs leading-5', notice.includes('检测通过') ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-100' : 'border-amber-500/20 bg-amber-500/5 text-amber-100')}>{notice}</div>}
+            {error && <div className="mt-4 rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">{error}</div>}
+          </div>
+        </div>
+        <div className="flex items-center justify-between border-t border-slate-800 px-5 py-3">
+          <span className="text-[10px] text-slate-600">保存后会自动使用最新 .env 发起一次连接检测。</span>
+          <div className="flex gap-2"><Button type="button" variant="ghost" onClick={onClose}>关闭</Button><Button type="submit" variant="primary" disabled={save.isPending}>{save.isPending ? <RefreshCw size={13} className="animate-spin" /> : <Settings size={13} />} 保存并检测</Button></div>
+        </div>
+      </form>
+    </div>
+  )
+}
 // TaskListView 复用同一网格呈现“全部/运行中/题型”筛选结果。
 function TaskListView({ client, title, subtitle, tasks, onSelect, onCreate }: { client: PlatformClient; title: string; subtitle: string; tasks: Task[]; onSelect: (task: Task) => void; onCreate: () => void }) {
   return <div className="panel-grid h-full overflow-y-auto p-6"><div className="mx-auto max-w-5xl">
@@ -512,7 +592,7 @@ function PolicyCard({ icon: Icon, title, description, value }: { icon: typeof Ac
 type WorkspaceTab = 'prompt' | 'process' | 'terminal' | 'files' | 'writeup'
 
 // TaskWorkspace 组合任务头部操作、状态、事件时间线、文件和 Writeup。
-function TaskWorkspace({ client, task, events, socketConnected, scheduler, onStart, onAbort, onPause, onResume, onCloseSandbox, actionError }: { client: PlatformClient; task: Task; events: PlatformEvent[]; socketConnected: boolean; scheduler?: SchedulerStatus; onStart: () => void; onAbort: () => void; onPause: () => void; onResume: () => void; onCloseSandbox: () => void; actionError: string }) {
+function TaskWorkspace({ client, task, events, socketConnected, scheduler, models, onStart, onAbort, onPause, onResume, onCloseSandbox, actionError }: { client: PlatformClient; task: Task; events: PlatformEvent[]; socketConnected: boolean; scheduler?: SchedulerStatus; models: ModelProfileStatus[]; onStart: () => void; onAbort: () => void; onPause: () => void; onResume: () => void; onCloseSandbox: () => void; actionError: string }) {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('process')
   const [selectedPath, setSelectedPath] = useState('')
   const [flagNotice, setFlagNotice] = useState<string>()
@@ -522,6 +602,7 @@ function TaskWorkspace({ client, task, events, socketConnected, scheduler, onSta
   const files = useQuery({ queryKey: ['workspace-files', task.id], queryFn: () => client.files(task.id), enabled: activeTab === 'files' })
   const file = useQuery({ queryKey: ['workspace-file', task.id, selectedPath], queryFn: () => client.file(task.id, selectedPath), enabled: activeTab === 'files' && !!selectedPath })
   const writeup = useQuery({ queryKey: ['writeup', task.id], queryFn: () => client.writeup(task.id), enabled: activeTab === 'writeup' || taskCanBeDeleted(task) })
+	const model = models.find(item => item.name === task.modelProfile) ?? (task.modelProfile ? undefined : models[0])
   const subtasks = useQuery({ queryKey: ['subtasks', task.id], queryFn: () => client.subtasks(task.id), refetchInterval: task.status === 'delegating' ? 2_000 : 8_000, refetchIntervalInBackground: false })
   const flags = useMemo(() => {
     const eventFlags = events.filter(event => event.type === 'flag.candidate' && event.source === 'writeup').map(event => String(event.payload.value ?? '')).filter(Boolean)
@@ -546,11 +627,19 @@ function TaskWorkspace({ client, task, events, socketConnected, scheduler, onSta
     <div className="flex h-[66px] shrink-0 items-center justify-between border-b border-slate-800 bg-[#0c1219] px-4"><div className="min-w-0"><div className="flex items-center gap-2"><CategoryIcon category={task.category} /><h1 className="truncate text-base font-semibold">{task.title}</h1><Badge className={statusStyles[task.status]}>{statusLabels[task.status]}</Badge>{queueItem && <span className="rounded border border-violet-500/25 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-200">队列第 {queueItem.position} 位 · 运行 {scheduler?.activeTaskCount ?? 0}/{scheduler?.settings.maxConcurrentTasks ?? 5}</span>}</div><div className="mt-1 flex items-center gap-3 text-[10px] text-slate-600"><span className="mono">{task.id}</span>{task.target && <span>{task.target}</span>}<span>{task.image}</span></div></div><div className="flex items-center gap-2">{task.status === 'queued' ? <Button variant="danger" onClick={onAbort}><CircleStop size={13} /> 取消排队</Button> : task.status === 'delegating' ? <Button variant="danger" onClick={onAbort}><CircleStop size={13} /> 中止协作</Button> : task.status === 'running' ? <><Button variant="secondary" onClick={onPause}>暂停</Button><Button variant="danger" onClick={onAbort}><CircleStop size={13} /> 中止</Button></> : task.status === 'provisioning' ? <Button variant="danger" onClick={onAbort}><CircleStop size={13} /> 中止</Button> : task.status === 'paused' ? <><Button variant="danger" onClick={onAbort}><CircleStop size={13} /> 中止</Button><Button variant="primary" onClick={onResume}><Play size={13} /> 恢复解题</Button></> : taskCanBeDeleted(task) && task.containerId ? <Button variant="secondary" onClick={onCloseSandbox}><Container size={13} /> 关闭实例</Button> : <Button variant="primary" onClick={onStart}><Play size={13} /> 启动 Pi Agent</Button>}</div></div>
     {actionError && <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2 text-xs text-red-300">{actionError}</div>}
     <div className="flex min-h-0 flex-1"><section className="flex min-w-0 flex-1 flex-col"><div className="flex h-9 items-center gap-2 border-b border-slate-800 bg-[#0a0f15] px-4 text-[11px]"><WorkspaceTabButton active={activeTab === 'prompt'} onClick={() => setActiveTab('prompt')}>提示词</WorkspaceTabButton><WorkspaceTabButton active={activeTab === 'process'} onClick={() => setActiveTab('process')}>解题过程</WorkspaceTabButton><WorkspaceTabButton active={activeTab === 'terminal'} onClick={() => setActiveTab('terminal')}>终端</WorkspaceTabButton><WorkspaceTabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')}>文件</WorkspaceTabButton><WorkspaceTabButton active={activeTab === 'writeup'} onClick={() => setActiveTab('writeup')}>解题报告</WorkspaceTabButton>{activeTab === 'process' && <ContainerStatus task={task} />}<span className="ml-auto flex items-center gap-1.5 text-slate-600"><span className={cn('size-1.5 rounded-full', socketConnected ? 'status-pulse bg-emerald-400' : 'bg-slate-600')} />{socketConnected ? '实时' : '重连中'}</span></div><div className={cn('panel-grid min-h-0 flex-1', activeTab === 'process' ? 'overflow-hidden p-4' : 'overflow-y-auto p-4')}>{activeTab === 'prompt' && <PromptPanel client={client} task={task} />}{activeTab === 'process' && <EventTimeline taskID={task.id} events={events} timing={solveTiming} elapsed={elapsed} />}{activeTab === 'terminal' && <TerminalTranscript events={events} />}{activeTab === 'files' && <WorkspaceFilesView client={client} taskID={task.id} files={files.data ?? []} loading={files.isLoading} error={files.error} selectedPath={selectedPath} onSelect={setSelectedPath} preview={file.data} previewLoading={file.isLoading} previewError={file.error} />}{activeTab === 'writeup' && <WriteupView loading={writeup.isLoading} error={writeup.error} writeup={writeup.data} taskTitle={task.title} />}</div></section>
-      <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-800 bg-[#0a0f15]"><SectionTitle icon={Flag} title="Flag 候选" subtitle={`已发现 ${flags.length} 个`} /><div className="space-y-2 p-3">{flags.map((flag, index) => <div key={`${flag}-${index}`} className="mono rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2.5 text-xs text-emerald-300">{flag}</div>)}{flags.length === 0 && <div className="rounded-md border border-dashed border-slate-800 p-4 text-center text-xs text-slate-600">正在监听 Agent 消息、工具输出与产物</div>}</div><SectionTitle icon={Bot} title="子 Agent 协作" subtitle={`最多 3 个 · 当前 ${subtasks.data?.length ?? 0} 个`} /><SubtaskPanel subtasks={subtasks.data ?? []} loading={subtasks.isLoading} error={subtasks.error} /><SectionTitle icon={Container} title="沙箱" subtitle="容器外安全边界" /><dl className="space-y-3 p-4 text-xs"><Detail label="镜像" value={task.image} mono /><Detail label="运行时" value={task.runtime || '尚未启动'} /><Detail label="容器" value={task.containerId?.slice(0, 12) || '—'} mono /><Detail label="工作区" value={task.id} mono /></dl><SectionTitle icon={Database} title="事件日志" subtitle="SQLite 持久化日志" /><div className="p-4 text-xs text-slate-500"><div className="flex justify-between"><span>序号</span><span className="mono text-slate-300">{events[events.length - 1]?.sequence ?? 0}</span></div><div className="mt-2 flex justify-between"><span>当前事件数</span><span className="mono text-slate-300">{events.length}</span></div></div></aside>
+      <aside className="w-[300px] shrink-0 overflow-y-auto border-l border-slate-800 bg-[#0a0f15]"><SectionTitle icon={Flag} title="Flag 候选" subtitle={`已发现 ${flags.length} 个`} /><div className="space-y-2 p-3">{flags.map((flag, index) => <div key={`${flag}-${index}`} className="mono min-w-0 whitespace-pre-wrap break-all rounded-md border border-emerald-500/25 bg-emerald-500/5 p-2.5 text-xs text-emerald-300">{flag}</div>)}{flags.length === 0 && <div className="rounded-md border border-dashed border-slate-800 p-4 text-center text-xs text-slate-600">正在监听 Agent 消息、工具输出与产物</div>}</div><ModelStatusCard model={model} /><SectionTitle icon={Bot} title="子 Agent 协作" subtitle={`最多 3 个 · 当前 ${subtasks.data?.length ?? 0} 个`} /><SubtaskPanel subtasks={subtasks.data ?? []} loading={subtasks.isLoading} error={subtasks.error} /><SectionTitle icon={Container} title="沙箱" subtitle="容器外安全边界" /><dl className="space-y-3 p-4 text-xs"><Detail label="镜像" value={task.image} mono /><Detail label="运行时" value={task.runtime || '尚未启动'} /><Detail label="容器" value={task.containerId?.slice(0, 12) || '—'} mono /><Detail label="工作区" value={task.id} mono /></dl><SectionTitle icon={Database} title="事件日志" subtitle="SQLite 持久化日志" /><div className="p-4 text-xs text-slate-500"><div className="flex justify-between"><span>序号</span><span className="mono text-slate-300">{events[events.length - 1]?.sequence ?? 0}</span></div><div className="mt-2 flex justify-between"><span>当前事件数</span><span className="mono text-slate-300">{events.length}</span></div></div></aside>
     </div>
     {flagNotice && <FlagSuccessToast taskTitle={task.title} flag={flagNotice} onClose={() => setFlagNotice(undefined)} />}
   </div>
 }
+
+function ModelStatusCard({ model }: { model?: ModelProfileStatus }) {
+  const probe = model?.probe
+  const state = !model?.configured ? '未配置' : !probe?.checkedAt ? '未检测' : probe.available ? '连接正常' : '连接失败'
+  const accent = !model?.configured ? 'text-amber-300' : !probe?.checkedAt ? 'text-slate-400' : probe.available ? 'text-emerald-300' : 'text-red-300'
+  return <section><SectionTitle icon={BrainCircuit} title="模型" subtitle={model?.name || '旧任务默认模型'} /><div className="space-y-2 border-b border-slate-800 p-3 text-xs"><div className="flex items-center justify-between gap-2"><span className="text-slate-500">模型 ID</span><span className="mono min-w-0 break-all text-right text-sky-200">{model?.modelId || '未记录'}</span></div><div className="flex items-center justify-between gap-2"><span className="text-slate-500">连接状态</span><span className={cn('font-medium', accent)}>{state}</span></div><div className="flex items-center justify-between gap-2"><span className="text-slate-500">图片识别</span><span className={model?.supportsImages ? 'text-violet-300' : 'text-slate-400'}>{model?.supportsImages ? '支持图片识别' : '仅文本（使用 OCR/取证）'}</span></div>{probe?.error && <div className="break-all rounded border border-red-500/20 bg-red-500/5 p-2 text-[10px] leading-4 text-red-200">{probe.error}</div>}</div></section>
+}
+
 
 // ContainerStatus 根据容器 ID 与任务状态区分运行、保留和已关闭实例。
 function ContainerStatus({ task }: { task: Task }) {
@@ -824,13 +913,17 @@ function isImportantEvent(event: PlatformEvent) {
 function EventCard({ event }: { event: PlatformEvent }) {
   const text = eventSummary(event)
   const isTool = event.type.startsWith('tool.')
-  const isError = event.type.includes('error') || event.type === 'task.failed'
+  const isError = event.type.includes('error') || event.type === 'task.failed' || event.type === 'model.request_failed'
   const Icon = isTool ? SquareTerminal : isError ? TriangleAlert : event.source === 'pi' ? Bot : Radio
   return <article className={cn('rounded-md border bg-[#0d141c]/95', isError ? 'border-red-500/25' : isTool ? 'border-slate-700' : 'border-slate-800')}><div className="flex items-center gap-2 border-b border-slate-800/80 px-3 py-2"><Icon size={13} className={cn(isError ? 'text-red-300' : isTool ? 'text-amber-300' : 'text-sky-300')} /><span className="text-[11px] font-medium text-slate-300">{eventLabel(event.type)}</span>{event.toolCallId && <span className="mono truncate text-[9px] text-slate-600">{event.toolCallId}</span>}<span className="ml-auto text-[9px] text-slate-600">{new Date(event.createdAt).toLocaleTimeString()}</span></div><div className="whitespace-pre-wrap break-words p-3 text-[11px] leading-5 text-slate-400">{text || '事件已记录。'}</div><details className="border-t border-slate-800/80 px-3 py-2 text-[10px] text-slate-600"><summary className="cursor-pointer select-none hover:text-slate-400">原始事件数据</summary><pre className="mono mt-2 max-h-44 overflow-auto whitespace-pre-wrap break-words text-[9px] leading-4 text-slate-600">{JSON.stringify(event.payload, null, 2)}</pre></details></article>
 }
 
 // eventSummary 为常见事件生成领域化摘要，未知事件回退提取通用文本。
 function eventSummary(event: PlatformEvent) {
+	if (event.type === 'model.request_failed') {
+		const status = event.payload.statusCode ? `（HTTP ${String(event.payload.statusCode)}）` : ''
+		return `模型服务拒绝了本次请求${status}：${String(event.payload.error ?? '未知错误')}`
+	}
   if (event.type === 'task.created') return `题目已创建：${String(event.payload.title ?? '')}`
   if (event.type === 'task.paused') return '已暂停当前 Pi 回合，容器、会话和已有产物仍会保留。'
   if (event.type === 'task.resumed') return '已恢复原容器与原 Pi 会话，Agent 将继续解题。'
@@ -866,8 +959,8 @@ function truncateEventText(text: string) {
 }
 
 // CreateDialog 收集题目元数据与附件，并在提交前保留文件夹相对路径。
-function CreateDialog({ pending, error, onClose, onSubmit }: { pending: boolean; error: string; onClose: () => void; onSubmit: (value: CreateTask, attachments: AttachmentInput[]) => void }) {
-  const [form, setForm] = useState<CreateTask>({ title: '', category: 'web', description: '', target: '', flagFormat: 'flag{...}' })
+function CreateDialog({ models, defaultModel, pending, error, onClose, onSubmit }: { models: ModelProfileStatus[]; defaultModel?: string; pending: boolean; error: string; onClose: () => void; onSubmit: (value: CreateTask, attachments: AttachmentInput[]) => void }) {
+  const [form, setForm] = useState<CreateTask>({ title: '', category: 'web', description: '', target: '', flagFormat: 'flag{...}', modelProfile: defaultModel || models[0]?.name || '' })
   const [attachments, setAttachments] = useState<AttachmentInput[]>([])
 
   // 以相对路径为键合并新选择，重复选择会替换旧 File 对象而不会重复上传。
@@ -882,7 +975,7 @@ function CreateDialog({ pending, error, onClose, onSubmit }: { pending: boolean;
 
   // 原生表单校验 required 字段后，将元数据和附件交给上层 mutation。
   const submit = (event: FormEvent) => { event.preventDefault(); onSubmit(form, attachments) }
-  return <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm" onMouseDown={event => event.target === event.currentTarget && onClose()}><form onSubmit={submit} className="my-4 w-full max-w-xl rounded-xl border border-slate-700 bg-[#0e151e] shadow-2xl shadow-black/60"><div className="flex items-center justify-between border-b border-slate-800 px-5 py-4"><div><h2 className="text-sm font-semibold">创建题目</h2><p className="mt-1 text-xs text-slate-500">系统会依据所选类型创建全新的 Pi 沙箱。</p></div><button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-800"><X size={16} /></button></div><div className="space-y-4 p-5"><Field label="题目名称"><input required value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} className="input" placeholder="例如：JWT 密钥混淆" /></Field><Field label="题目类型"><div className="grid grid-cols-6 gap-1.5">{categories.map(category => <button key={category.id} type="button" onClick={() => setForm({ ...form, category: category.id })} className={cn('flex flex-col items-center gap-1 rounded-md border px-2 py-2 text-[10px]', form.category === category.id ? 'border-sky-400/50 bg-sky-400/10 text-sky-200' : 'border-slate-800 bg-slate-900 text-slate-500 hover:border-slate-700')}><category.icon size={14} />{category.label}</button>)}</div></Field><Field label="题目描述"><textarea required rows={5} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="input resize-none" placeholder="粘贴题目描述和已授权的目标范围…" /></Field><div className="grid grid-cols-2 gap-3"><Field label="目标地址"><input value={form.target} onChange={e => setForm({ ...form, target: e.target.value })} className="input mono" placeholder="http://target:8080" /></Field><Field label="Flag 格式"><input value={form.flagFormat} onChange={e => setForm({ ...form, flagFormat: e.target.value })} className="input mono" /></Field></div><AttachmentDropZone attachments={attachments} onAdd={addAttachments} onRemove={path => setAttachments(current => current.filter(item => item.path !== path))} />{error && <div className="rounded-md border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">{error}</div>}</div><div className="flex items-center justify-end gap-2 border-t border-slate-800 px-5 py-3"><Button type="button" variant="ghost" onClick={onClose}>取消</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />} 创建任务</Button></div></form></div>
+  return <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/70 p-4 backdrop-blur-sm" onMouseDown={event => event.target === event.currentTarget && onClose()}><form onSubmit={submit} className="my-4 w-full max-w-xl rounded-xl border border-slate-700 bg-[#0e151e] shadow-2xl shadow-black/60"><div className="flex items-center justify-between border-b border-slate-800 px-5 py-4"><div><h2 className="text-sm font-semibold">创建题目</h2><p className="mt-1 text-xs text-slate-500">系统会依据所选类型创建全新的 Pi 沙箱。</p></div><button type="button" onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-800"><X size={16} /></button></div><div className="space-y-4 p-5"><Field label="题目名称"><input required value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} className="input" placeholder="例如：JWT 密钥混淆" /></Field><Field label="题目类型"><div className="grid grid-cols-6 gap-1.5">{categories.map(category => <button key={category.id} type="button" onClick={() => setForm({ ...form, category: category.id })} className={cn('flex flex-col items-center gap-1 rounded-md border px-2 py-2 text-[10px]', form.category === category.id ? 'border-sky-400/50 bg-sky-400/10 text-sky-200' : 'border-slate-800 bg-slate-900 text-slate-500 hover:border-slate-700')}><category.icon size={14} />{category.label}</button>)}</div></Field><Field label="题目描述"><textarea required rows={5} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="input resize-none" placeholder="粘贴题目描述和已授权的目标范围…" /></Field><div className="grid grid-cols-2 gap-3"><Field label="目标地址"><input value={form.target} onChange={e => setForm({ ...form, target: e.target.value })} className="input mono" placeholder="http://target:8080" /></Field><Field label="Flag 格式"><input value={form.flagFormat} onChange={e => setForm({ ...form, flagFormat: e.target.value })} className="input mono" /></Field><Field label="模型"><select value={form.modelProfile} onChange={e => setForm({ ...form, modelProfile: e.target.value })} className="input">{models.map(model => <option key={model.name} value={model.name}>{model.name} · {model.modelId} · {model.supportsImages ? '支持图片识别' : '仅文本'}</option>)}</select></Field></div><AttachmentDropZone attachments={attachments} onAdd={addAttachments} onRemove={path => setAttachments(current => current.filter(item => item.path !== path))} />{error && <div className="rounded-md border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">{error}</div>}</div><div className="flex items-center justify-end gap-2 border-t border-slate-800 px-5 py-3"><Button type="button" variant="ghost" onClick={onClose}>取消</Button><Button type="submit" variant="primary" disabled={pending}>{pending ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />} 创建任务</Button></div></form></div>
 }
 
 // AttachmentDropZone 同时支持拖拽、文件选择和 webkitdirectory 文件夹选择。
