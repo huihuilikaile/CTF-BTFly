@@ -47,6 +47,16 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 任务事件会先写入 SQLite，再通过 WebSocket 实时推送。前端断线或切换页面后，可以根据单调递增的 `sequence` 补齐历史。
 
+图文说明/更新说明:
+
+在公众号进行发布图文说明
+
+https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g
+
+https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw
+
+https://mp.weixin.qq.com/s/9Tznr2-ZnFP9knj2J3CqFg
+
 ## 核心能力
 
 | 能力 | 说明 |
