@@ -63,6 +63,9 @@ type Gateway struct {
 	recorder UsageRecorder
 	errors   ErrorReporter
 	probe    ProbeStatus
+	// normalizeDeveloperRole 仅为 DeepSeek 上游启用 developer -> system
+	// 兼容，避免改变支持 developer 角色的其他模型语义。
+	normalizeDeveloperRole bool
 }
 
 // ProbeStatus 是仅供本机控制平面展示的模型连通性摘要；不包含上游地址、
@@ -106,6 +109,8 @@ func New(config Config) (*Gateway, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse model upstream URL: %w", err)
 	}
+	modelID := strings.ToLower(strings.TrimSpace(config.ModelID))
+	gateway.normalizeDeveloperRole = strings.HasPrefix(modelID, "deepseek")
 
 	// ReverseProxy 负责流式转发；Director 去掉本地 /model 前缀，
 	// 并把容器短期 Token 替换为真实上游凭据。
@@ -253,12 +258,78 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	// 改写失败采用“原样转发”策略，兼容非标准 OpenAI 上游。
+	if g.normalizeDeveloperRole {
+		normalizeRoles(request)
+	}
 	if g.config.IncludeStreamUsage {
 		ensureStreamUsage(request)
 	}
 	meta := &requestUsageMeta{taskID: taskID, model: g.config.ModelID, started: time.Now()}
 	request = request.WithContext(context.WithValue(request.Context(), requestUsageMetaKey{}, meta))
 	g.proxy.ServeHTTP(writer, request)
+}
+
+// normalizeRoles 将 chat/completions 请求中的 developer 角色改写为 system，
+// 兼容 DeepSeek 等不识别 developer 角色的 OpenAI 兼容上游。
+func normalizeRoles(request *http.Request) {
+	if request.Body == nil || !strings.HasSuffix(strings.TrimSuffix(request.URL.Path, "/"), "/chat/completions") || !strings.Contains(strings.ToLower(request.Header.Get("Content-Type")), "application/json") {
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(request.Body, maxJSONRequestRewrite+1))
+	if err != nil {
+		return
+	}
+	if len(data) > maxJSONRequestRewrite {
+		request.Body = io.NopCloser(io.MultiReader(bytes.NewReader(data), request.Body))
+		request.ContentLength = -1
+		request.Header.Del("Content-Length")
+		return
+	}
+	var body map[string]json.RawMessage
+	if json.Unmarshal(data, &body) != nil {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	messagesRaw, ok := body["messages"]
+	if !ok {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	var messages []map[string]json.RawMessage
+	if json.Unmarshal(messagesRaw, &messages) != nil {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	changed := false
+	for index, message := range messages {
+		role, ok := message["role"]
+		if !ok {
+			continue
+		}
+		var roleName string
+		if json.Unmarshal(role, &roleName) == nil && roleName == "developer" {
+			messages[index]["role"] = json.RawMessage(`"system"`)
+			changed = true
+		}
+	}
+	if !changed {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	encodedMessages, err := json.Marshal(messages)
+	if err != nil {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	body["messages"] = encodedMessages
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		request.Body = io.NopCloser(bytes.NewReader(data))
+		return
+	}
+	request.Body = io.NopCloser(bytes.NewReader(encoded))
+	request.ContentLength = int64(len(encoded))
+	request.Header.Set("Content-Length", strconv.Itoa(len(encoded)))
 }
 
 // ensureStreamUsage 以尽力而为方式给流式 chat/completions 请求加入

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -173,6 +174,135 @@ func TestEnsureStreamUsageAddsOpenAICompatibleOption(t *testing.T) {
 	}
 	if !value.StreamOptions.IncludeUsage {
 		t.Fatalf("stream usage option was not added: %s", body)
+	}
+}
+
+// TestNormalizeRolesRewritesOnlyDeveloper 验证 DeepSeek 不支持的 developer
+// 会降级为 system，同时不会改变其他 OpenAI 兼容角色和消息内容。
+func TestNormalizeRolesRewritesOnlyDeveloper(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/model/v1/chat/completions", strings.NewReader(`{"model":"test","messages":[{"role":"developer","content":"rules"},{"role":"user","content":"question"},{"role":"assistant","content":"answer"},{"role":"tool","content":"result","tool_call_id":"call_1"}]}`))
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	normalizeRoles(request)
+
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Messages []struct {
+			Role       string `json:"role"`
+			Content    string `json:"content"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Messages) != 4 {
+		t.Fatalf("unexpected messages: %s", body)
+	}
+	if value.Messages[0].Role != "system" || value.Messages[0].Content != "rules" {
+		t.Fatalf("developer role was not normalized: %s", body)
+	}
+	if value.Messages[1].Role != "user" || value.Messages[2].Role != "assistant" || value.Messages[3].Role != "tool" || value.Messages[3].ToolCallID != "call_1" {
+		t.Fatalf("non-developer messages were changed: %s", body)
+	}
+	if request.ContentLength != int64(len(body)) || request.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Fatalf("request length was not updated: contentLength=%d header=%q body=%d", request.ContentLength, request.Header.Get("Content-Length"), len(body))
+	}
+}
+
+// TestGatewayNormalizesRolesAndAddsStreamUsage 验证两个请求改写按预期组合，
+// 防止后一次 JSON 重写覆盖前一次 DeepSeek 角色适配。
+func TestGatewayNormalizesRolesAndAddsStreamUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Messages) != 1 || body.Messages[0].Role != "system" {
+			t.Fatalf("developer role reached upstream: %#v", body.Messages)
+		}
+		if !body.StreamOptions.IncludeUsage {
+			t.Fatalf("stream usage option was not preserved: %#v", body.StreamOptions)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{
+		UpstreamBaseURL:    upstream.URL,
+		UpstreamAPIKey:     "upstream-secret",
+		ModelID:            "deepseek-test",
+		IncludeStreamUsage: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := gateway.Issue("task_deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/model/chat/completions", strings.NewReader(`{"model":"deepseek-test","stream":true,"messages":[{"role":"developer","content":"rules"}]}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	gateway.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		body, _ := io.ReadAll(response.Result().Body)
+		t.Fatalf("unexpected status %d: %s", response.Code, body)
+	}
+}
+
+// TestGatewayKeepsDeveloperRoleForOtherModels 确认 DeepSeek 适配不会改变
+// 明确支持 developer 角色的其他 OpenAI 兼容模型。
+func TestGatewayKeepsDeveloperRoleForOtherModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Messages) != 1 || body.Messages[0].Role != "developer" {
+			t.Fatalf("non-DeepSeek role was changed: %#v", body.Messages)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "upstream-secret", ModelID: "openai-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := gateway.Issue("task_openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://gateway/model/chat/completions", strings.NewReader(`{"model":"openai-test","messages":[{"role":"developer","content":"rules"}]}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	gateway.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		body, _ := io.ReadAll(response.Result().Body)
+		t.Fatalf("unexpected status %d: %s", response.Code, body)
 	}
 }
 
