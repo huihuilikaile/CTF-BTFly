@@ -55,7 +55,7 @@ func Run() error {
 		return err
 	}
 	defer sandboxes.Close()
-	gateway, err := modelgateway.NewPool(modelPoolConfigFromEnv())
+	gateway, err := modelgateway.NewLivePool(modelPoolConfigFromEnv())
 	if err != nil {
 		return err
 	}
@@ -71,8 +71,15 @@ func Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	server := api.New(address, token, store, hub, agents, sandboxes, gateway)
-	// “重新读取并检测”只构造临时模型池，绝不替换正在为 Agent 提供短期令牌的网关。
-	server.SetModelConfigProbe(probeLatestModelConfig)
+	// “重新读取并检测”原子切换到最新模型池；LivePool 会保留仍持有任务
+	// Token 的旧池，因此新任务立即可选新模型，运行中任务也不会中断。
+	server.SetModelConfigProbe(func(ctx context.Context, profile string) (modelgateway.ProbeStatus, error) {
+		status, reloadErr := reloadLatestModelConfig(ctx, gateway, profile)
+		if reloadErr == nil && gateway.Configured() {
+			go func() { _ = agents.DispatchQueued(context.Background()) }()
+		}
+		return status, reloadErr
+	})
 	// API 端点只请求主循环关闭，主循环负责统一释放 HTTP、SQLite 和 Docker 资源。
 	server.SetShutdownRequest(stop)
 	result := make(chan error, 1)
@@ -100,10 +107,10 @@ func modelPoolConfigFromEnv() modelgateway.PoolConfig {
 	return modelgateway.PoolConfigFromLookup(os.Getenv)
 }
 
-// probeLatestModelConfig reads the current .env into an isolated temporary pool.
-// It proves that a saved configuration can connect without swapping the live
-// gateway, so no running task token or in-flight model stream is interrupted.
-func probeLatestModelConfig(ctx context.Context, profile string) (modelgateway.ProbeStatus, error) {
+// reloadLatestModelConfig reads the current .env, atomically publishes the new
+// pool, then probes the requested profile. LivePool keeps any old pool that
+// still owns task-scoped tokens, so running tasks remain connected.
+func reloadLatestModelConfig(ctx context.Context, gateway *modelgateway.LivePool, profile string) (modelgateway.ProbeStatus, error) {
 	path, err := envfile.ConfigFile()
 	if err != nil {
 		return modelgateway.ProbeStatus{}, err
@@ -118,10 +125,9 @@ func probeLatestModelConfig(ctx context.Context, profile string) (modelgateway.P
 	} else if !os.IsNotExist(statErr) {
 		return modelgateway.ProbeStatus{}, fmt.Errorf("inspect .env file %s: %w", path, statErr)
 	}
-	pool, err := modelgateway.NewPool(modelgateway.PoolConfigFromLookup(lookup))
-	if err != nil {
+	if err := gateway.Reload(modelgateway.PoolConfigFromLookup(lookup)); err != nil {
 		return modelgateway.ProbeStatus{}, err
 	}
-	_ = pool.Probe(ctx, profile)
-	return pool.ProbeStatus(profile), nil
+	_ = gateway.Probe(ctx, profile)
+	return gateway.ProbeStatus(profile), nil
 }

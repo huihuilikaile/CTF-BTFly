@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +22,6 @@ import (
 	"github.com/ctfagentpi/ctfagentpi/internal/platform"
 	"github.com/ctfagentpi/ctfagentpi/internal/sandbox"
 	"github.com/ctfagentpi/ctfagentpi/internal/storage"
-)
-
-// 三个正则只接受 WRITEUP.md 中“最终 Flag”标题下的首个代码块，
-// 避免把命令输出、示例格式或失败猜测当成成功结果。
-var (
-	finalFlagHeading    = regexp.MustCompile(`(?im)^#{1,6}\s*最终\s*Flag\s*$`)
-	nextMarkdownHeading = regexp.MustCompile(`(?m)^#{1,6}\s+`)
-	finalFlagCodeBlock  = regexp.MustCompile("(?s)```[^\\r\\n]*\\r?\\n(.*?)```")
 )
 
 // 这些哨兵错误描述任务状态机的操作边界，API 层据此映射为 409 Conflict。
@@ -62,6 +53,11 @@ type Service struct {
 	tokens       map[string]string
 	settled      map[string]bool
 	paused       map[string]bool
+	flagBuffers  map[string]string
+	flagFindings map[string]map[string]bool
+	// flagFindingLoaded 标记已从持久事件恢复过去的识别结果，避免重试或
+	// 打开历史任务时重复追加完全相同的候选事件。
+	flagFindingLoaded map[string]bool
 }
 
 // 预览与 Flag 提取都采用有界读取，避免前端或正则处理超大 Agent 产物。
@@ -95,6 +91,8 @@ func NewService(store *storage.Store, hub *eventhub.Hub, sandboxes *sandbox.Mana
 		store: store, hub: hub, sandboxes: sandboxes, gateway: gateway,
 		workspaces: workspaces, publicURL: publicURL,
 		tokens: make(map[string]string), settled: make(map[string]bool), paused: make(map[string]bool),
+		flagBuffers: make(map[string]string), flagFindings: make(map[string]map[string]bool),
+		flagFindingLoaded: make(map[string]bool),
 	}
 }
 
@@ -569,6 +567,14 @@ func (s *Service) Delete(ctx context.Context, taskID string) error {
 	token := s.tokens[task.ID]
 	delete(s.tokens, task.ID)
 	delete(s.settled, task.ID)
+	delete(s.paused, task.ID)
+	delete(s.flagFindings, task.ID)
+	delete(s.flagFindingLoaded, task.ID)
+	for key := range s.flagBuffers {
+		if strings.HasPrefix(key, task.ID+"|") {
+			delete(s.flagBuffers, key)
+		}
+	}
 	s.mu.Unlock()
 	if token != "" {
 		s.gateway.Revoke(token)
@@ -816,6 +822,7 @@ func (s *Service) readRPC(task platform.Task, reader io.Reader) {
 		}
 		event := normalize(task.ID, line)
 		_, _ = s.emit(context.Background(), event)
+		s.detectEventFlags(task, event)
 		if event.Type == "agent.settled" {
 			s.markSettled(task.ID)
 		}
@@ -869,7 +876,9 @@ func (s *Service) markSettled(taskID string) {
 	// 刚刚运行中的旧状态误判为不可委派。
 	task.Status = platform.TaskSettled
 	_, _ = s.emit(context.Background(), platform.Event{TaskID: taskID, Source: "system", Type: "task.settled", Payload: platform.JSONPayload(map[string]string{"message": "Pi is idle and the sandbox remains available"})})
-	s.detectWriteupFlags(context.Background(), taskID)
+	// Pi 可能在 settled 前一刻才落盘或 rename 报告，立即检测并进行短暂
+	// 退避重试，覆盖 Windows/Docker 文件同步的时间差。
+	s.scheduleFlagDetection(taskID)
 	// 专项子任务完成后回传父任务；根任务则检查通用的最多三子 Agent 委派。
 	if task.ParentTaskID != "" {
 		go func() { _ = s.finishGenericSubtask(task, "completed", "") }()
@@ -890,57 +899,6 @@ func (s *Service) markSettled(taskID string) {
 		return
 	}
 	s.requestQueueDispatch()
-}
-
-// detectWriteupFlags 只信任报告中明确的“## 最终 Flag”章节，
-// 避免把工具输出、Prompt 或失败假设中的字符串显示为已验证 Flag。
-func (s *Service) detectWriteupFlags(ctx context.Context, taskID string) {
-	root, err := s.taskWorkspace(ctx, taskID)
-	if err != nil {
-		return
-	}
-	path, err := resolveWorkspaceFile(root, "WRITEUP.md")
-	if err != nil {
-		return
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxWriteupFlagBytes+1))
-	if err != nil || len(data) > maxWriteupFlagBytes || !utf8.Valid(data) {
-		return
-	}
-	// 每个合法候选写入持久事件，前端无需重新解析整个报告即可显示成功提示。
-	for _, candidate := range flagsFromWriteup(string(data)) {
-		_, _ = s.emit(ctx, platform.Event{TaskID: taskID, Source: "writeup", Type: "flag.candidate", Payload: platform.JSONPayload(map[string]string{"value": candidate, "source": "WRITEUP.md / 最终 Flag"})})
-	}
-}
-
-// flagsFromWriteup 提取“最终 Flag”章节首个代码块中的单行值。
-func flagsFromWriteup(writeup string) []string {
-	// 先切出目标标题到下一个 Markdown 标题之间的内容。
-	section := finalFlagHeading.FindStringIndex(writeup)
-	if section == nil {
-		return nil
-	}
-	content := writeup[section[1]:]
-	if next := nextMarkdownHeading.FindStringIndex(content); next != nil {
-		content = content[:next[0]]
-	}
-
-	// Flag 格式由不同 CTF 平台决定，不能硬编码为 flag{...}。只有报告作者
-	// 在“最终 Flag”小节的代码块中明确写出的单行值才会作为已验证 Flag。
-	match := finalFlagCodeBlock.FindStringSubmatch(content)
-	if len(match) != 2 {
-		return nil
-	}
-	candidate := strings.TrimSpace(match[1])
-	if candidate == "" || candidate == "未找到" || strings.ContainsAny(candidate, "\r\n") || len(candidate) > 1024 {
-		return nil
-	}
-	return []string{candidate}
 }
 
 // isFinished 判断任务是否进入允许关闭实例、重试或删除的终态。
@@ -1071,6 +1029,8 @@ category 只能是 web、pwn、reverse、crypto、forensics、misc；artifactPat
 报告应当可以作为赛后直接提交的完整中文 Writeup：避免只给结论或只列命令。若解题使用了脚本，必须使用完全一致的二级标题“## exp”，并把最终可复现脚本的完整代码直接置于该标题下的代码块中；同时在正文写明该脚本保存的实际路径。若有截图、图片、频谱图、二维码或其他图像证据，必须保存到 /workspace/artifacts，并在 Markdown 正文中使用相对路径引用，例如：![RSA 参数可视化](artifacts/rsa-params.png)。不要引用容器外的绝对路径或网络图片。
 
 若获得并验证了 Flag，必须额外使用完全一致的二级标题“## 最终 Flag”，并在该标题下的代码块中只写入最终验证通过的 Flag；不得在这个小节写入候选值、示例格式或未验证猜测。若未获得 Flag，也必须创建“## 最终 Flag”小节并写明“未找到”，不要放入任何 flag{...} 示例。
+
+同时必须写入 /workspace/artifacts/final-result.json，供平台稳定识别最终状态。成功时格式为 {"status":"solved","flags":[{"value":"实际验证通过的 Flag","verified":true,"evidence":"简述验证依据"}]}；未成功时格式为 {"status":"unsolved","flags":[]}。该文件只能写入实际结果，不得复制预期格式、示例值或未验证猜测。
 
 不要把未验证的猜测写成结论，也不要输出模型内部推理。完成报告后，必须执行 test -s /workspace/WRITEUP.md 确认文件非空；最终回复中说明报告和关键产物的实际路径。
 

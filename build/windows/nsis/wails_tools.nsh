@@ -14,7 +14,7 @@
     !define INFO_PRODUCTNAME "CTF-BTFly"
 !endif
 !ifndef INFO_PRODUCTVERSION
-    !define INFO_PRODUCTVERSION "0.1.0"
+    !define INFO_PRODUCTVERSION "1.3.1"
 !endif
 !ifndef INFO_COPYRIGHT
     !define INFO_COPYRIGHT "© 2026, CTF-BTFly"

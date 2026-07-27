@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ctfagentpi/ctfagentpi/internal/agent"
+	"github.com/ctfagentpi/ctfagentpi/internal/buildinfo"
 	"github.com/ctfagentpi/ctfagentpi/internal/eventhub"
 	"github.com/ctfagentpi/ctfagentpi/internal/modelgateway"
 	"github.com/ctfagentpi/ctfagentpi/internal/platform"
@@ -40,6 +41,26 @@ func TestTaskCreationAndEventReplayOverHTTP(t *testing.T) {
 	server := New("127.0.0.1:0", "test-token", store, hub, agents, sandboxes, gateway)
 	transport := httptest.NewServer(server.http.Handler)
 	defer transport.Close()
+
+	// 系统接口必须返回统一发布版本，供底栏和“关于”页面共同展示。
+	systemRequest, _ := http.NewRequest(http.MethodGet, transport.URL+"/api/system", nil)
+	systemRequest.Header.Set("Authorization", "Bearer test-token")
+	systemResponse, err := http.DefaultClient.Do(systemRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer systemResponse.Body.Close()
+	var systemStatus struct {
+		Daemon struct {
+			Version string `json:"version"`
+		} `json:"daemon"`
+	}
+	if err := json.NewDecoder(systemResponse.Body).Decode(&systemStatus); err != nil {
+		t.Fatal(err)
+	}
+	if systemStatus.Daemon.Version != buildinfo.Version {
+		t.Fatalf("daemon version = %q, want %q", systemStatus.Daemon.Version, buildinfo.Version)
+	}
 
 	// 携带 daemon Bearer Token 创建一条合法 Crypto 任务。
 	payload, _ := json.Marshal(platform.CreateTask{Title: "HTTP journal", Category: "crypto", Description: "test challenge"})

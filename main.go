@@ -34,6 +34,9 @@ func main() {
 	// 主窗口采用固定的最小尺寸，以保证三栏工作台在缩放后仍然可用。
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title: "CTF-BTFly", Width: 1440, Height: 900, MinWidth: 1120, MinHeight: 720,
+		// Wails v3 默认阻止来自资源管理器的外部文件投放。开启后，
+		// 带 data-file-drop-target 的 React 区域才能收到 WebView2 拖放事件。
+		EnableFileDrop: true,
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 50,
 			Backdrop:                application.MacBackdropTranslucent,

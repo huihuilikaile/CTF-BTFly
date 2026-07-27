@@ -19,11 +19,13 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/ctfagentpi/ctfagentpi/internal/agent"
+	"github.com/ctfagentpi/ctfagentpi/internal/buildinfo"
 	"github.com/ctfagentpi/ctfagentpi/internal/eventhub"
 	"github.com/ctfagentpi/ctfagentpi/internal/modelgateway"
 	"github.com/ctfagentpi/ctfagentpi/internal/platform"
 	"github.com/ctfagentpi/ctfagentpi/internal/sandbox"
 	"github.com/ctfagentpi/ctfagentpi/internal/storage"
+	"github.com/ctfagentpi/ctfagentpi/internal/systemstats"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -36,6 +38,7 @@ type Server struct {
 	agents           *agent.Service
 	sandboxes        *sandbox.Manager
 	gateway          modelgateway.Manager
+	resources        *systemstats.Sampler
 	modelConfigProbe ModelConfigProbe
 	http             *http.Server
 	// requestShutdown 由 daemon 主循环提供。HTTP handler 只发出退出请求，
@@ -45,7 +48,7 @@ type Server struct {
 
 // New 注册健康检查、模型代理、受鉴权 REST API 与任务 WebSocket 路由。
 func New(address, token string, store *storage.Store, hub *eventhub.Hub, agents *agent.Service, sandboxes *sandbox.Manager, gateway modelgateway.Manager) *Server {
-	server := &Server{address: address, token: token, store: store, hub: hub, agents: agents, sandboxes: sandboxes, gateway: gateway}
+	server := &Server{address: address, token: token, store: store, hub: hub, agents: agents, sandboxes: sandboxes, gateway: gateway, resources: systemstats.NewSampler()}
 	router := chi.NewRouter()
 	router.Use(server.cors)
 
@@ -62,6 +65,7 @@ func New(address, token string, store *storage.Store, hub *eventhub.Hub, agents 
 		api.Post("/api/system/model-probe", server.probeModel)
 		api.Get("/api/models/config", server.modelConfigs)
 		api.Put("/api/models/config", server.saveModelConfig)
+		api.Delete("/api/models/config/{profile}", server.deleteModelConfig)
 		api.Get("/api/settings", server.executionSettings)
 		api.Put("/api/settings", server.updateExecutionSettings)
 		api.Get("/api/model-usage", server.modelUsage)
@@ -152,17 +156,18 @@ func (s *Server) system(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"daemon":       map[string]string{"address": s.address, "version": "0.1.0"},
+		"daemon":       map[string]string{"address": s.address, "version": buildinfo.Version},
 		"docker":       s.sandboxes.Health(request.Context()),
 		"modelGateway": map[string]any{"configured": s.gateway.Configured(), "model": s.gateway.ModelID(""), "probe": s.gateway.ProbeStatus(""), "defaultModel": s.gateway.DefaultProfile(), "models": s.gateway.Profiles()},
+		"resources":    s.resources.Snapshot(),
 		"scheduler":    scheduler,
 		"stack":        []string{"Wails v3", "React 19", "Tailwind CSS 4", "Go daemon", "SQLite", "Docker SDK", "Pi RPC"},
 	})
 }
 
-// probeModel 由系统概况的“重新读取并检测”触发。daemon 注入最新 .env 的
-// 临时探测器时，不会替换正在服务任务的 live gateway；上游失败依旧以 200 和
-// 结构化状态返回，避免将鉴权/522 等诊断伪装成平台接口故障。
+// probeModel 由系统概况的“重新读取并检测”触发。daemon 会原子加载最新
+// .env，同时保留仍服务运行中任务的旧模型池；上游失败依旧以 200 和结构化
+// 状态返回，避免将鉴权/522 等诊断伪装成平台接口故障。
 func (s *Server) probeModel(writer http.ResponseWriter, request *http.Request) {
 	profile := request.URL.Query().Get("profile")
 	if s.modelConfigProbe != nil {
@@ -552,11 +557,25 @@ func (s *Server) downloadWorkspaceFile(writer http.ResponseWriter, request *http
 	_, _ = io.Copy(writer, file)
 }
 
-// readWriteup 以固定 WRITEUP.md 路径读取报告；尚未生成时返回 exists=false。
+// readWriteup 返回报告内容和后端统一识别的 Flag 结果；读取接口本身也会
+// 触发一次检测，使升级前已完成的历史任务无需重跑即可获得候选。
 func (s *Server) readWriteup(writer http.ResponseWriter, request *http.Request) {
-	file, err := s.agents.ReadWorkspaceFile(request.Context(), chi.URLParam(request, "taskID"), "WRITEUP.md")
+	taskID := chi.URLParam(request, "taskID")
+	flags := s.agents.DetectFlags(request.Context(), taskID)
+	file, err := s.agents.ReadWorkspaceFile(request.Context(), taskID, "WRITEUP.md")
 	if errors.Is(err, os.ErrNotExist) {
-		writeJSON(writer, http.StatusOK, map[string]any{"exists": false, "content": ""})
+		// 兼容模型生成的 writeup.md、Writeup.md 等大小写变体。
+		if files, listErr := s.agents.ListWorkspaceFiles(request.Context(), taskID); listErr == nil {
+			for _, candidate := range files {
+				if strings.EqualFold(candidate.Path, "WRITEUP.md") {
+					file, err = s.agents.ReadWorkspaceFile(request.Context(), taskID, candidate.Path)
+					break
+				}
+			}
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		writeJSON(writer, http.StatusOK, map[string]any{"exists": false, "content": "", "flags": flags})
 		return
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -567,7 +586,10 @@ func (s *Server) readWriteup(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"exists": true, "content": file.Content, "truncated": file.Truncated, "binary": file.Binary})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"exists": true, "content": file.Content, "truncated": file.Truncated,
+		"binary": file.Binary, "flags": flags,
+	})
 }
 
 // shutdownDaemon 在任何任务处于运行、创建中或暂停时拒绝退出，

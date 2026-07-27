@@ -200,13 +200,29 @@ func (p *Pool) Revoke(token string) {
 
 func (p *Pool) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
-	for _, gateway := range p.models {
-		if _, valid := gateway.taskForToken(token); valid {
-			gateway.ServeHTTP(writer, request)
-			return
-		}
+	if gateway := p.gatewayForToken(token); gateway != nil {
+		gateway.ServeHTTP(writer, request)
+		return
 	}
 	http.Error(writer, "invalid task model token", http.StatusUnauthorized)
+}
+
+func (p *Pool) gatewayForToken(token string) *Gateway {
+	for _, gateway := range p.models {
+		if _, valid := gateway.taskForToken(token); valid {
+			return gateway
+		}
+	}
+	return nil
+}
+
+func (p *Pool) hasActiveTokens() bool {
+	for _, gateway := range p.models {
+		if gateway.hasActiveTokens() {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Pool) SetUsageRecorder(recorder UsageRecorder) {

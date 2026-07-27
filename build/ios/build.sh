@@ -4,8 +4,8 @@ set -e
 # Build configuration
 APP_NAME="ctfagentpi.exe"
 BUNDLE_ID="com.example.ctfagentpi"
-VERSION="0.1.0"
-BUILD_NUMBER="0.1.0"
+VERSION="1.3.1"
+BUILD_NUMBER="1.3.1"
 BUILD_DIR="build/ios"
 TARGET="simulator"
 

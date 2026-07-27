@@ -7,6 +7,7 @@
     为每道 CTF 题目提供可观察、可复现、可人工接管的自主分析环境。
   </p>
   <p>
+    <img src="https://img.shields.io/badge/Version-1.3.1-38BDF8" alt="Version 1.3.1" />
     <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26" />
     <img src="https://img.shields.io/badge/Wails-v3-EA4AAA" alt="Wails v3" />
     <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&amp;logoColor=111827" alt="React 19" />
@@ -24,6 +25,8 @@
 ## 目录
 
 - [项目简介](#项目简介)
+- [图文说明与更新记录](#图文说明与更新记录)
+- [1.3.1 功能更新](#131-功能更新)
 - [核心能力](#核心能力)
 - [系统架构](#系统架构)
 - [快速开始](#快速开始)
@@ -47,31 +50,54 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 任务事件会先写入 SQLite，再通过 WebSocket 实时推送。前端断线或切换页面后，可以根据单调递增的 `sequence` 补齐历史。
 
-图文说明/更新说明:
+## 图文说明与更新记录
 
-在公众号进行发布图文说明
+项目图文说明和版本更新记录发布于：
 
-https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g
+- [CTF-BTFly 图文说明（一）](https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g)
+- [CTF-BTFly 图文说明（二）](https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw)
+- [CTF-BTFly 图文说明（三）](https://mp.weixin.qq.com/s/9Tznr2-ZnFP9knj2J3CqFg)
 
-https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw
+## 1.3.1 功能更新
 
-https://mp.weixin.qq.com/s/9Tznr2-ZnFP9knj2J3CqFg
+### 模型配置与兼容性
+
+- 在桌面端新增或编辑模型后，daemon 会原子热更新模型池；检测模型下拉框和新建题目模型列表立即刷新，无需重启程序；
+- 已配置模型支持右键删除，并在模态窗口中二次确认；只要仍有 `ready`、`queued`、`provisioning`、`running`、`paused` 等未结束题目使用该模型，后端就会拒绝删除；
+- 删除保护兼容旧数据库中仅保存 `model_id`、尚未保存 `model_profile` 的题目；删除默认模型后会自动切换到剩余模型，删除最后一个模型时会完整清理旧配置，避免配置“复活”；
+- 模型 ID 以 `deepseek` 开头时，仅针对该模型把 Chat Completions 请求中的 `developer` 角色改写为 `system`，其他 OpenAI-compatible 模型保持原始角色；
+- `CTF_MODEL_*_SUPPORTS_IMAGES=false` 会继续阻止图片内容块发往不支持视觉输入的模型。
+
+### 题目创建与桌面交互
+
+- Web、Crypto、Pwn、Reverse、Forensics、Misc 分类内容区支持直接拖入文件或文件夹，自动打开新建题目窗口、预选当前题型并保留附件目录结构；
+- Wails v3 主窗口已启用原生外部文件投放，支持从 Windows 资源管理器拖入文件；进入有效区域时会显示高亮反馈；
+- 原始数据、工作区文件、Flag、命令输出和解题报告恢复文本选择与复制，并提高选区背景对比度；
+- 左下角新增宿主机 CPU 与物理内存占用，随系统状态轮询更新，不采集进程列表、主机名或路径。
+
+### Flag 候选识别
+
+- 根据题目填写的 Flag 格式生成安全匹配规则，综合实时 Agent/工具事件和 `WRITEUP.md` 识别候选；
+- 支持中英文最终 Flag 标题、代码块、行内代码及 `Flag:` 标签，并区分“候选”与“已验证结果”；
+- 对候选按值去重并保留来源、置信度和格式命中状态，降低格式提示不准确或输出位置变化造成的漏识别。
 
 ## 核心能力
 
 | 能力 | 说明 |
 |---|---|
-| 本地桌面工作台 | 创建题目、分类筛选、实时状态、主题切换、右键清理 |
+| 本地桌面工作台 | 创建题目、分类筛选、实时状态、主题切换、右键清理、CPU/内存监控 |
 | 独立控制平面 | GUI 退出或隐藏后，daemon 可继续管理正在运行的任务 |
 | 一题一沙箱 | 每道题拥有独立容器、工作区、Agent 会话和短期模型 Token |
 | 六类专项镜像 | Web、Crypto、Pwn、Reverse、Forensics、Misc |
 | 实时事件流 | Agent 消息、工具调用、stderr、沙箱状态和 Flag 候选统一记录 |
 | 断线重放 | SQLite 持久事件与 WebSocket 实时事件按序号合并 |
-| 附件与 Artifact | 支持文件/文件夹上传、工作区浏览、文本预览和原文件下载 |
+| 附件与 Artifact | 支持分类区拖入文件/文件夹创建题目、工作区浏览、文本复制和原文件下载 |
 | 强制中文 Writeup | Agent 必须生成可复现的 `WRITEUP.md` 和关键分析产物 |
-| Flag 提取 | 只从 `## 最终 Flag` 章节的代码块提取已验证结果 |
+| Flag 候选识别 | 综合预期格式、实时事件与最终报告，区分候选和已验证结果 |
 | 暂停与恢复 | 保留原容器、Pi 会话和工作区，继续同一次解题上下文 |
 | 模型用量账本 | 记录请求数、输入/输出/缓存/推理 Token 和按题目/日期聚合 |
+| 多模型热更新 | 桌面端新增、编辑、检测和安全删除模型，无需重启 daemon |
+| DeepSeek 适配 | DeepSeek 请求自动执行 `developer → system`，不影响其他模型 |
 | 受控专项协作 | 根 Agent 可按证据创建最多 3 个隔离专项子任务；支持全部六类题型，子任务结果会回传供主 Agent 复现与整合 |
 
 ## 系统架构
@@ -152,7 +178,9 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 > [!IMPORTANT]
 > `.env` 包含真实模型密钥，不要提交到 Git、复制进 Docker 镜像或放入题目工作区。
 
-桌面端可在“系统概况 → 模型连接 → 管理模型”中新建或编辑多个配置；界面只显示 URL、模型 ID、能力开关和“密钥已设置”状态，绝不会回显 API Key。“重新读取并检测”会使用最新 `.env` 创建隔离的临时连接检测，不会影响正在运行的任务。保存后仍需重启 daemon/桌面程序，新增配置才会用于新建题目。
+桌面端可在“系统概况 → 模型连接 → 管理模型”中新建或编辑多个配置；界面只显示 URL、模型 ID、能力开关和“密钥已设置”状态，绝不会回显 API Key。保存或“重新读取并检测”会原子热更新模型池，新配置会立即出现在检测模型和新建题目下拉框中，运行中题目仍保留原连接和短期 Token，无需重启 daemon/桌面程序。
+
+已保存模型可通过右键菜单删除。删除操作需要模态确认；后端会独立检查所有未结束题目，如果仍有题目使用该模型则返回冲突并保留配置。删除 `.env` 中的模型同时会移除对应 API Key，因此该操作不可撤销。
 
 ### 4. 构建专项镜像
 
@@ -220,9 +248,9 @@ http://host.docker.internal:<daemon-port>/model
 
 ## 使用流程
 
-1. 点击“新建题目”；
-2. 选择题型并填写题目描述、授权目标和 Flag 格式；
-3. 拖拽上传题目文件或整个附件目录；
+1. 点击“新建题目”，或进入某一题型分类后直接把文件/文件夹拖入内容区；
+2. 确认自动选择的题型，并填写题目描述、授权目标和 Flag 格式；
+3. 检查已带入的附件及目录结构；
 4. 启动任务，观察沙箱状态和实时分析时间线；
 5. 必要时暂停任务，补充线索后恢复原 Pi 会话；
 6. 在“文件”页查看脚本、响应和分析产物；
@@ -289,13 +317,15 @@ CTFAgentPi/
 │   ├── agent/               任务编排、Pi RPC、Flag 与受控专项协作
 │   ├── api/                 REST、WebSocket、鉴权、上传和下载
 │   ├── appdata/             数据目录、连接文件和 daemon Token
+│   ├── buildinfo/           统一应用版本信息
 │   ├── daemon/              控制平面依赖装配与生命周期
 │   ├── envfile/             本地 .env 解析
 │   ├── eventhub/            进程内实时事件广播
-│   ├── modelgateway/        模型反向代理与 Token 用量
+│   ├── modelgateway/        多模型热更新、反向代理与 Token 用量
 │   ├── platform/            核心领域模型
 │   ├── sandbox/             Docker 沙箱管理
-│   └── storage/             SQLite 数据访问
+│   ├── storage/             SQLite 数据访问
+│   └── systemstats/         Windows CPU 与物理内存采样
 ├── skills/                  CTF 方法与参考资料库
 ├── main.go                  Wails 桌面入口
 ├── desktopservice.go        GUI 与 daemon 桥接
@@ -331,12 +361,15 @@ wails3 build
 - SQLite 任务、事件序号与断线重放；
 - 父子任务模型用量聚合；
 - 模型短期 Token 替换和 usage 解析；
+- DeepSeek `developer → system` 定向改写及非 DeepSeek 不改写；
+- 多模型热更新、删除最后一个模型及未结束题目删除保护；
 - 流式请求自动加入 usage 选项；
 - HTTP 鉴权、任务创建与事件查询；
 - Pi 文本和工具事件标准化；
 - `.env` 优先级与错误输入；
 - 附件基础目录穿越检查；
-- 最终 Flag 章节提取。
+- Flag 格式匹配、实时候选检测与最终章节提取；
+- Windows CPU/内存采样及异常计数边界。
 
 ## 当前限制
 
@@ -346,8 +379,7 @@ wails3 build
 - “终端”页是 Pi 工具输出转录，不是交互式 PTY；
 - 每个根任务整个生命周期最多可创建 3 个子 Agent；子任务不能继续委派，最终判断与 Writeup 始终由根 Agent 负责；
 - daemon 异常重启后的活跃任务状态恢复仍需完善；
-- 工作区、事件和模型流式缓冲仍需增加更完整的配额边界；
-- 仓库当前未包含 `LICENSE` 文件，公开分发前应由维护者明确许可证。
+- 工作区、事件和模型流式缓冲仍需增加更完整的配额边界。
 
 ## 最后
 

@@ -24,14 +24,21 @@ func PoolConfigFromLookup(lookup func(string) string) PoolConfig {
 		})
 	}
 	if len(config.Models) == 0 {
-		config.Models = append(config.Models, ModelConfig{
+		legacy := ModelConfig{
 			Name: "default", UpstreamBaseURL: lookup("CTF_UPSTREAM_MODEL_BASE_URL"),
 			UpstreamAPIKey: lookup("CTF_UPSTREAM_MODEL_API_KEY"), ModelID: lookup("CTF_MODEL_ID"),
 			IncludeStreamUsage: streamUsageEnabled(lookup("CTF_MODEL_INCLUDE_STREAM_USAGE")),
 			SupportsImages:     imageInputEnabled(lookup("CTF_MODEL_SUPPORTS_IMAGES")),
-		})
-		if config.DefaultModel == "" {
-			config.DefaultModel = "default"
+		}
+		// An entirely empty .env represents an empty model list. Preserve a
+		// partially configured legacy profile so the editor can still repair it.
+		if strings.TrimSpace(legacy.UpstreamBaseURL) != "" || strings.TrimSpace(legacy.UpstreamAPIKey) != "" || strings.TrimSpace(legacy.ModelID) != "" {
+			config.Models = append(config.Models, legacy)
+			if config.DefaultModel == "" {
+				config.DefaultModel = "default"
+			}
+		} else {
+			config.DefaultModel = ""
 		}
 	}
 	return config

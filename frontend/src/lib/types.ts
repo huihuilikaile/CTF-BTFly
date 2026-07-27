@@ -43,9 +43,14 @@ export interface WorkspaceFileContent {
   path: string; content: string; truncated: boolean; binary: boolean
 }
 
-// Writeup 是固定 WRITEUP.md 的读取结果。
+// FlagCandidate 由后端统一检测器生成；只有 verified=true 才表示最终结果。
+export interface FlagCandidate {
+  value: string; source: string; confidence: number; verified: boolean; formatMatched: boolean
+}
+
+// Writeup 是固定 WRITEUP.md 的读取结果，并附带后端权威识别结果。
 export interface Writeup {
-  exists: boolean; content: string; truncated?: boolean; binary?: boolean
+  exists: boolean; content: string; truncated?: boolean; binary?: boolean; flags?: FlagCandidate[]
 }
 
 // DockerHealth 描述 Engine 可用性、运行时选择和隔离降级警告。
@@ -68,8 +73,14 @@ export interface SystemStatus {
   daemon: { address: string; version: string }
   docker: DockerHealth
   modelGateway: { configured: boolean; model: string; probe: ModelProbeStatus; defaultModel: string; models: ModelProfileStatus[] }
+  resources: HostResourceStatus
   scheduler: SchedulerStatus
   stack: string[]
+}
+
+export interface HostResourceStatus {
+  available: boolean; cpuPercent: number; memoryPercent: number
+  memoryUsedBytes: number; memoryTotalBytes: number
 }
 
 // ModelProbeStatus 是 daemon 对真实上游模型的最近一次轻量连接检测结果；
@@ -83,8 +94,8 @@ export interface ModelProfileStatus {
   supportsImages: boolean; includeStreamUsage: boolean; default: boolean; probe: ModelProbeStatus
 }
 
-// ModelProbeResult 表示一次“重新读取 .env 后检测”的结果；configLoaded 为 true
-// 时，结果来自隔离的临时配置池，不会改变正在运行任务的模型网关。
+// ModelProbeResult 表示一次“重新读取 .env 并热更新模型池”后的检测结果；
+// configLoaded 为 true 时，系统状态和新任务模型列表已经使用最新配置。
 export interface ModelProbeResult extends ModelProbeStatus { configLoaded: boolean }
 
 // ModelConfigSummary 是 .env 内已保存模型的安全摘要，API Key 仅暴露是否存在。

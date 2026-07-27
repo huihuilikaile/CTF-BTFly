@@ -20,6 +20,7 @@ export class PlatformClient {
   modelProbe = (profile?: string) => this.request<ModelProbeResult>(`/api/system/model-probe${profile ? `?profile=${encodeURIComponent(profile)}` : ''}`, { method: 'POST' })
   modelConfigs = () => this.request<ModelConfigList>('/api/models/config')
   saveModelConfig = (config: ModelConfigInput) => this.request<ModelConfigList>('/api/models/config', { method: 'PUT', body: JSON.stringify(config) })
+  deleteModelConfig = (profile: string) => this.request<ModelConfigList>(`/api/models/config/${encodeURIComponent(profile)}`, { method: 'DELETE' })
   executionSettings = () => this.request<ExecutionSettings>('/api/settings')
   updateExecutionSettings = (settings: ExecutionSettings) => this.request<ExecutionSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(settings) })
   modelUsage = () => this.request<ModelUsageReport>('/api/model-usage')

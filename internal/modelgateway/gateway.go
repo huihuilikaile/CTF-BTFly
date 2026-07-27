@@ -245,6 +245,13 @@ func (g *Gateway) Revoke(token string) {
 	g.mu.Unlock()
 }
 
+func (g *Gateway) hasActiveTokens() bool {
+	g.mu.RLock()
+	active := len(g.tokens) > 0
+	g.mu.RUnlock()
+	return active
+}
+
 // ServeHTTP 校验题目 Token、按需改写流式参数，并把请求转交上游。
 func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if !g.Configured() {

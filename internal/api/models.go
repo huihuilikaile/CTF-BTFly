@@ -9,13 +9,15 @@ import (
 
 	"github.com/ctfagentpi/ctfagentpi/internal/envfile"
 	"github.com/ctfagentpi/ctfagentpi/internal/modelgateway"
+	"github.com/ctfagentpi/ctfagentpi/internal/platform"
+	"github.com/go-chi/chi/v5"
 )
 
-// ModelConfigProbe tests a freshly-read .env in an isolated pool. It must never
-// mutate the live gateway, which may be serving task-scoped credentials.
+// ModelConfigProbe reloads the freshly-read .env and tests the selected model.
+// The daemon's live manager preserves pools that still serve task credentials.
 type ModelConfigProbe func(context.Context, string) (modelgateway.ProbeStatus, error)
 
-// SetModelConfigProbe installs the daemon-owned fresh-config probe callback.
+// SetModelConfigProbe installs the daemon-owned reload-and-probe callback.
 func (s *Server) SetModelConfigProbe(probe ModelConfigProbe) { s.modelConfigProbe = probe }
 
 // ModelProbeResult adds the source of a connection result without exposing an
@@ -103,6 +105,81 @@ func (s *Server) saveModelConfig(writer http.ResponseWriter, request *http.Reque
 	writeJSON(writer, http.StatusOK, result)
 }
 
+func (s *Server) deleteModelConfig(writer http.ResponseWriter, request *http.Request) {
+	name, err := normalizeModelName(chi.URLParam(request, "profile"))
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if s.store == nil {
+		writeError(writer, http.StatusServiceUnavailable, fmt.Errorf("task store is unavailable"))
+		return
+	}
+	tasks, err := s.store.ListTasks(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	profile, _ := s.gateway.Profile(name)
+	defaultProfile := s.gateway.DefaultProfile()
+	blocking := make([]map[string]string, 0)
+	for _, task := range tasks {
+		usesModel := task.ModelProfile == name
+		if strings.TrimSpace(task.ModelProfile) == "" {
+			// Tasks created before model profiles were persisted only retain
+			// model_id. Keep those historical, unfinished tasks protected too.
+			usesModel = (profile.ModelID != "" && task.ModelID == profile.ModelID) ||
+				(task.ModelID == "" && defaultProfile == name)
+		}
+		if usesModel && !modelDeletionTerminalStatus(task.Status) {
+			blocking = append(blocking, map[string]string{"id": task.ID, "title": task.Title, "status": string(task.Status)})
+		}
+	}
+	if len(blocking) > 0 {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"error": fmt.Sprintf("模型 %s 仍被 %d 个未结束题目使用，请先结束这些题目后再删除", name, len(blocking)),
+			"tasks": blocking,
+		})
+		return
+	}
+
+	path, err := envfile.ConfigFile()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	values, err := envfile.Read(path)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
+	updates, nextDefault, err := modelConfigDeletionUpdates(values, name)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, err)
+		return
+	}
+	if err := envfile.Update(path, updates); err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	if s.modelConfigProbe != nil {
+		if _, err := s.modelConfigProbe(request.Context(), nextDefault); err != nil {
+			writeError(writer, http.StatusInternalServerError, fmt.Errorf("reload model configuration: %w", err))
+			return
+		}
+	}
+	result, err := readModelConfigList()
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
+func modelDeletionTerminalStatus(status platform.TaskStatus) bool {
+	return status == platform.TaskSettled || status == platform.TaskFailed || status == platform.TaskCancelled
+}
+
 func readModelConfigList() (ModelConfigList, error) {
 	path, err := envfile.ConfigFile()
 	if err != nil {
@@ -132,15 +209,9 @@ func summarizeModelConfig(model modelgateway.ModelConfig, defaultModel string) M
 }
 
 func validateModelConfig(input *ModelConfigInput) error {
-	name := strings.ToLower(strings.TrimSpace(input.Name))
-	if len(name) == 0 || len(name) > 32 || name[0] < 'a' || name[0] > 'z' {
-		return fmt.Errorf("model profile name must start with a lowercase letter and be at most 32 characters")
-	}
-	for _, character := range name {
-		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
-			continue
-		}
-		return fmt.Errorf("model profile name may contain only lowercase letters, digits, and hyphens")
+	name, err := normalizeModelName(input.Name)
+	if err != nil {
+		return err
 	}
 	input.Name = name
 	input.BaseURL = strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
@@ -159,6 +230,20 @@ func validateModelConfig(input *ModelConfigInput) error {
 		return fmt.Errorf("API key must be a single line")
 	}
 	return nil
+}
+
+func normalizeModelName(raw string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if len(name) == 0 || len(name) > 32 || name[0] < 'a' || name[0] > 'z' {
+		return "", fmt.Errorf("model profile name must start with a lowercase letter and be at most 32 characters")
+	}
+	for _, character := range name {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+			continue
+		}
+		return "", fmt.Errorf("model profile name may contain only lowercase letters, digits, and hyphens")
+	}
+	return name, nil
 }
 
 func modelConfigUpdates(values map[string]string, input ModelConfigInput) (map[string]*string, error) {
@@ -196,8 +281,8 @@ func modelConfigUpdates(values map[string]string, input ModelConfigInput) (map[s
 	}
 
 	if !multiModel {
-		legacy := config.Models[0]
-		if configuredModel(legacy) {
+		if len(config.Models) > 0 && configuredModel(config.Models[0]) {
+			legacy := config.Models[0]
 			names = []string{"default"}
 			setProfileValues(updates, "default", legacy)
 		} else {
@@ -221,6 +306,65 @@ func modelConfigUpdates(values map[string]string, input ModelConfigInput) (map[s
 	}
 	setModelValue(updates, "CTF_DEFAULT_MODEL", defaultModel)
 	return updates, nil
+}
+
+func modelConfigDeletionUpdates(values map[string]string, name string) (map[string]*string, string, error) {
+	config := modelgateway.PoolConfigFromLookup(func(key string) string { return values[key] })
+	found := false
+	for _, model := range config.Models {
+		if model.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, "", fmt.Errorf("model profile %q was not found", name)
+	}
+
+	updates := make(map[string]*string)
+	multiModel := strings.TrimSpace(values["CTF_MODELS"]) != ""
+	if !multiModel {
+		for _, key := range []string{
+			"CTF_UPSTREAM_MODEL_BASE_URL", "CTF_UPSTREAM_MODEL_API_KEY", "CTF_MODEL_ID",
+			"CTF_MODEL_INCLUDE_STREAM_USAGE", "CTF_MODEL_SUPPORTS_IMAGES", "CTF_DEFAULT_MODEL",
+		} {
+			updates[key] = nil
+		}
+		return updates, "", nil
+	}
+
+	names := make([]string, 0, len(config.Models)-1)
+	for _, model := range config.Models {
+		if model.Name != name {
+			names = append(names, model.Name)
+		}
+	}
+	for _, suffix := range []string{"BASE_URL", "API_KEY", "ID", "INCLUDE_STREAM_USAGE", "SUPPORTS_IMAGES"} {
+		updates[profileKey(name, suffix)] = nil
+	}
+	nextDefault := config.DefaultModel
+	if !containsModelName(names, nextDefault) {
+		nextDefault = ""
+		if len(names) > 0 {
+			nextDefault = names[0]
+		}
+	}
+	if len(names) == 0 {
+		updates["CTF_MODELS"] = nil
+		updates["CTF_DEFAULT_MODEL"] = nil
+		// Legacy keys may remain after a previous one-to-many migration. Clear
+		// them so deleting the last profile cannot resurrect a stale default.
+		for _, key := range []string{
+			"CTF_UPSTREAM_MODEL_BASE_URL", "CTF_UPSTREAM_MODEL_API_KEY", "CTF_MODEL_ID",
+			"CTF_MODEL_INCLUDE_STREAM_USAGE", "CTF_MODEL_SUPPORTS_IMAGES",
+		} {
+			updates[key] = nil
+		}
+	} else {
+		setModelValue(updates, "CTF_MODELS", strings.Join(names, ","))
+		setModelValue(updates, "CTF_DEFAULT_MODEL", nextDefault)
+	}
+	return updates, nextDefault, nil
 }
 
 func configuredModel(model modelgateway.ModelConfig) bool {
