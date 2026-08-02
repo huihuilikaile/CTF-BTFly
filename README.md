@@ -20,7 +20,7 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 ## 图文说明与更新记录
 
-**使用时需要启动docker desktop,打开右上角显示绿色提示灯为正常。**
+**使用时需要启动docker desktop，配置镜像文件(下文有教程)，配置env文件(模型baseurl+key+id等信息),打开右上角显示绿色提示灯,模型连接正常，即可开始使用。**
 
 ![image-20260802170230450](/template/image-1.png)
 
