@@ -1,28 +1,10 @@
-#                 CTF-BTFLY: CTF agent 自动化解题工具
-
-
+#                              CTF-BTFLY: CTF agent 自动化解题工具
 
 
 
 > [!CAUTION]
 > CTF-BTFly 只能用于明确授权的 CTF 题目、靶场和安全研究环境。  
 > 请勿使用本项目扫描、测试或攻击未授权目标，也不要把比赛附件、Flag、凭据或私有数据上传到第三方服务。
-
-## 目录
-
-- [项目简介](#项目简介)
-- [图文说明与更新记录](#图文说明与更新记录)
-- [1.3.1 功能更新](#131-功能更新)
-- [核心能力](#核心能力)
-- [系统架构](#系统架构)
-- [快速开始](#快速开始)
-- [模型网关配置](#模型网关配置)
-- [使用流程](#使用流程)
-- [沙箱与安全模型](#沙箱与安全模型)
-- [题型与专项镜像](#题型与专项镜像)
-- [项目结构](#项目结构)
-- [开发与验证](#开发与验证)
-- [当前限制](#当前限制)
 
 ## 项目简介
 
@@ -38,7 +20,53 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 ## 图文说明与更新记录
 
-项目图文说明和版本更新记录发布于：
+**使用时需要启动docker desktop,打开右上角显示绿色提示灯为正常。**
+
+![image-20260802170230450](/template/image-1.png)
+
+**拖动题目附件到对应的区域会启动创建题目窗口**
+
+![image-20260802170718611](/template/image-2.png)
+
+**填入题目信息，选择已经配置的模型，web/pwn/...配置远程地址，flag格式默认是flag{...}**
+
+![image-20260802170822399](/template/image-3.png)
+
+**题目创建好启动agent即可**
+
+![image-20260802171115701](/template/image-4.png)
+
+**提示词 可以在这里暂停增加新的提示**
+
+![image-20260802171232549](/template/image-5.png)
+
+**解题过程 显示ai执行的一系列操作和思考过程 右上角可以暂停和中止 显示解题时间**
+
+![image-20260802171400156](/template/image-6.png)
+
+**终端和文件会显示工具执行的信息，产生的文件，文件允许下载**
+
+![image-20260802171615345](/template/image-7.png)
+
+**wp 解题成功后会自动编写wp 允许下载**
+
+![image-20260802171904333](/template/image-9.png)
+
+**题目卡片可以删除题目 可以选择是否保存wp**
+
+![image-20260802172032323](/template/image-10.png)
+
+每道题的默认工作区结构：
+
+```text
+data/workspaces/task_xxx/
+├── attachments/       用户上传的题目附件
+├── artifacts/         Agent 保存的脚本、响应和证据
+├── .pi-sessions/      Pi 会话数据
+└── WRITEUP.md         中文可复现解题报告
+```
+
+项目图文说明和版本更新记录同时发布于：
 
 - [CTF-BTFly 图文说明（一）](https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g)
 - [CTF-BTFly 图文说明（二）](https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw)
@@ -122,54 +150,6 @@ http://host.docker.internal:<daemon-port>/model
 ```
 
 访问本地模型网关。SQLite 用量账本只保存模型名、Token 数、状态码和耗时，不保存 Prompt、回复、请求头或真实 Key。
-
-## 使用流程
-
-**使用时需要启动docker desktop,打开右上角显示绿色提示灯为正常。**
-
-![image-20260802170230450](/template/image-1.png)
-
-**拖动题目附件到对应的区域会启动创建题目窗口**
-
-![image-20260802170718611](/template/image-2.png)
-
-**填入题目信息，选择已经配置的模型，web/pwn/...配置远程地址，flag格式默认是flag{...}**
-
-![image-20260802170822399](/template/image-3.png)
-
-**题目创建好启动agent即可**
-
-![image-20260802171115701](/template/image-4.png)
-
-**提示词 可以在这里暂停增加新的提示**
-
-![image-20260802171232549](/template/image-5.png)
-
-**解题过程 显示ai执行的一系列操作和思考过程 右上角可以暂停和中止 显示解题时间**
-
-![image-20260802171400156](/template/image-6.png)
-
-**终端和文件会显示工具执行的信息，产生的文件，文件允许下载**
-
-![image-20260802171615345](/template/image-7.png)
-
-**wp 解题成功后会自动编写wp 允许下载**
-
-![image-20260802171904333](/template/image-9.png)
-
-**题目卡片可以删除题目 可以选择是否保存wp**
-
-![image-20260802172032323](/template/image-10.png)
-
-每道题的默认工作区结构：
-
-```text
-data/workspaces/task_xxx/
-├── attachments/       用户上传的题目附件
-├── artifacts/         Agent 保存的脚本、响应和证据
-├── .pi-sessions/      Pi 会话数据
-└── WRITEUP.md         中文可复现解题报告
-```
 
 ## 沙箱与安全模型
 
