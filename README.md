@@ -1,22 +1,4 @@
-<div align="center">
-  <img src="./frontend/public/cpi-icon.png" width="96" alt="CTF-BTFly Logo" />
-  <h1>CTF-BTFly</h1>
-  <p><strong>自动化 CTF 解题工作台</strong></p>
-  <p>
-    将桌面工作台、独立 Go 控制平面、Docker 隔离沙箱、Pi Agent 与模型网关组合在一起，<br />
-    为每道 CTF 题目提供可观察、可复现、可人工接管的自主分析环境。
-  </p>
-  <p>
-    <img src="https://img.shields.io/badge/Version-1.3.1-38BDF8" alt="Version 1.3.1" />
-    <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26" />
-    <img src="https://img.shields.io/badge/Wails-v3-EA4AAA" alt="Wails v3" />
-    <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&amp;logoColor=111827" alt="React 19" />
-    <img src="https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&amp;logoColor=white" alt="TypeScript 7" />
-    <img src="https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&amp;logoColor=white" alt="Docker Sandbox" />
-    <img src="https://img.shields.io/badge/SQLite-Local--first-003B57?logo=sqlite&amp;logoColor=white" alt="SQLite Local-first" />
-  </p>
-</div>
-
+# CTF-BTFLY: CTF agent 自动化解题工具
 
 > [!CAUTION]
 > CTF-BTFly 只能用于明确授权的 CTF 题目、靶场和安全研究环境。  
