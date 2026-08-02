@@ -141,7 +141,7 @@ http://host.docker.internal:<daemon-port>/model
 
 **使用时需要启动docker desktop,打开右上角显示绿色提示灯为正常。**
 
-![image-20260802170230450](\template\image-1.png)
+![image-20260802170230450](/template/image-1.png)
 
 **拖动题目附件到对应的区域会启动创建题目窗口**
 
