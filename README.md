@@ -145,35 +145,35 @@ http://host.docker.internal:<daemon-port>/model
 
 **拖动题目附件到对应的区域会启动创建题目窗口**
 
-![image-20260802170718611](\template\image-2.png)
+![image-20260802170718611](/template/image-2.png)
 
 **填入题目信息，选择已经配置的模型，web/pwn/...配置远程地址，flag格式默认是flag{...}**
 
-![image-20260802170822399](\template\image-3.png)
+![image-20260802170822399](/template/image-3.png)
 
 **题目创建好启动agent即可**
 
-![image-20260802171115701](\template\image-4.png)
+![image-20260802171115701](/template/image-4.png)
 
 **提示词 可以在这里暂停增加新的提示**
 
-![image-20260802171232549](\template\image-5.png)
+![image-20260802171232549](/template/image-5.png)
 
 **解题过程 显示ai执行的一系列操作和思考过程 右上角可以暂停和中止 显示解题时间**
 
-![image-20260802171400156](\template\image-6.png)
+![image-20260802171400156](/template/image-6.png)
 
 **终端和文件会显示工具执行的信息，产生的文件，文件允许下载**
 
-![image-20260802171615345](\template\image-7.png)
+![image-20260802171615345](/template/image-7.png)
 
 **wp 解题成功后会自动编写wp 允许下载**
 
-![image-20260802171904333](\template\image-9.png)
+![image-20260802171904333](/template/image-9.png)
 
 **题目卡片可以删除题目 可以选择是否保存wp**
 
-![image-20260802172032323](\template\image-10.png)
+![image-20260802172032323](/template/image-10.png)
 
 每道题的默认工作区结构：
 
