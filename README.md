@@ -22,6 +22,10 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 ![image-20260802170230450](/template/image-1.png)
 
+**docker镜像可以一键导入(2.0新增)**
+
+![image-20260804202707879](/template/12.png)
+
 **拖动题目附件到对应的区域会启动创建题目窗口**
 
 ![image-20260802170718611](/template/image-2.png)
@@ -29,6 +33,10 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 **填入题目信息，选择已经配置的模型，web/pwn/...配置远程地址，flag格式默认是flag{...}**
 
 ![image-20260802170822399](/template/image-3.png)
+
+**2.0版本新增多模型协同模式 针对ctf难题可以选择此模式**
+
+![image-20260804202439143](/template/11.png)
 
 **题目创建好启动agent即可**
 
@@ -54,6 +62,10 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 
 ![image-20260802172032323](/template/image-10.png)
 
+**允许自定义主题配色(2.0新增)**
+
+![image-20260804202849172](/template/13.png)
+
 每道题的默认工作区结构：
 
 ```text
@@ -63,12 +75,6 @@ data/workspaces/task_xxx/
 ├── .pi-sessions/      Pi 会话数据
 └── WRITEUP.md         中文可复现解题报告
 ```
-
-项目图文说明和版本更新记录同时发布于：
-
-- [CTF-BTFly 图文说明（一）](https://mp.weixin.qq.com/s/RLU-ROZ0YfjJMzR3BDdl8g)
-- [CTF-BTFly 图文说明（二）](https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw)
-- [CTF-BTFly 图文说明（三）](https://mp.weixin.qq.com/s/9Tznr2-ZnFP9knj2J3CqFg)
 
 ### 配置模型网关
 
@@ -94,46 +100,20 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 
 ```
 
-### 构建专项镜像
+### 专项镜像
 
-windows下下载docker desktop
-
-```powershell
-.\images\build.ps1 -Version 0.1.0
-```
-
-首次构建需要下载 Node、Python、Debian 软件包和各题型工具，耗时取决于网络与 Docker 缓存。
-
-### 桌面程序
-
-主要：
-
-```text
-bin/
-├── CTF-BTFly.exe
-└── ctfagent-daemon.exe
-```
-
-GUI 启动时会优先连接已有 daemon；未检测到可用实例时，会自动启动同目录的 `ctfagent-daemon.exe`。
-
-daemon 会为每次任务启动签发随机短期 Token。容器通过：
-
-```text
-http://host.docker.internal:<daemon-port>/model
-```
-
-访问本地模型网关。SQLite 用量账本只保存模型名、Token 数、状态码和耗时，不保存 Prompt、回复、请求头或真实 Key。
+**进群可以下载构建好的: 921416626**
 
 ## 题型与专项镜像
 
-| 题型 | 镜像 | 代表工具 | 目标运行时 |
-|---|---|---|---|
-| Web | `ctf-agent-pi-web:0.1.0` | Nmap、SQLMap、Gobuster、WhatWeb | gVisor |
-| Crypto | `ctf-agent-pi-crypto:0.1.0` | John、gmpy2、PyCryptodome、SymPy、Z3 | gVisor |
-| Pwn | `ctf-agent-pi-pwn:0.1.0` | GDB、QEMU、Pwntools、Ropper、Checksec | Kata/VM |
-| Reverse | `ctf-agent-pi-reverse:0.1.0` | Apktool、angr、GDB、Strace、Ltrace | gVisor/Kata |
-| Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility | gVisor/Kata |
-| Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy | gVisor |
+| 题型 | 镜像 | 代表工具 |
+|---|---|---|
+| Web | `ctf-agent-pi-web:0.1.0` | Nmap、SQLMap、Gobuster、WhatWeb |
+| Crypto | `ctf-agent-pi-crypto:0.1.0` | John、gmpy2、PyCryptodome、SymPy、Z3 |
+| Pwn | `ctf-agent-pi-pwn:0.1.0` | GDB、QEMU、Pwntools、Ropper、Checksec |
+| Reverse | `ctf-agent-pi-reverse:0.1.0` | Apktool、angr、GDB、Strace、Ltrace |
+| Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility |
+| Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy |
 
 ## 最后
 
@@ -142,4 +122,4 @@ http://host.docker.internal:<daemon-port>/model
 在开源的这个期间呢，我感受到了开源作者的一些痛苦，要面对很多问题，有一些问题我都无法诉说，更甚至的呢还要被说“招笑”，我也不知道这个项目好笑在哪里😂，可能是agent不是自己写的用的pi，可能项目代码是ai写的，我只负责了框架，基于以上呢，我决定不在github上放出来了，1.3.1版本也已经非常好用了，可以实现一定的自动化了。后面优化agent的也不开放了，毕竟是开源的，想要什么功能自己可以做，想弄的尽量早点存代码，我要删除了，群里也不再解决问题了。
 最后：🙏🏻🙏🏻🙏🏻**
 
-欢迎交流agent:921416626
+**欢迎进群交流agent:921416626**
