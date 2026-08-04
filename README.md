@@ -16,8 +16,6 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 - **Pi RPC Agent**在容器内自主分析附件、执行命令、编写脚本并生成中文 `WRITEUP.md`；
 - **本地模型网关**把题目级短期 Token 替换为真实上游 Key，真实密钥不会进入容器或前端。
 
-任务事件会先写入 SQLite，再通过 WebSocket 实时推送。前端断线或切换页面后，可以根据单调递增的 `sequence` 补齐历史。
-
 ## 图文说明与更新记录
 
 **使用时需要启动docker desktop，配置镜像文件(下文有教程)，配置env文件(模型baseurl+key+id等信息),打开右上角显示绿色提示灯,模型连接正常，即可开始使用。**
@@ -72,8 +70,6 @@ data/workspaces/task_xxx/
 - [CTF-BTFly 图文说明（二）](https://mp.weixin.qq.com/s/_bZ32TZykNCsyjqdLdRVXw)
 - [CTF-BTFly 图文说明（三）](https://mp.weixin.qq.com/s/9Tznr2-ZnFP9knj2J3CqFg)
 
-## 快速开始
-
 ### 配置模型网关
 
 在最终 `CTF-BTFly.exe` 所在目录创建 `.env`。开发构建默认产物位于 `bin/`，因此通常创建 `bin/.env`：
@@ -98,13 +94,6 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 
 ```
 
-> [!IMPORTANT]
-> `.env` 包含真实模型密钥，不要提交到 Git、复制进 Docker 镜像或放入题目工作区。
-
-桌面端可在“系统概况 → 模型连接 → 管理模型”中新建或编辑多个配置；界面只显示 URL、模型 ID、能力开关和“密钥已设置”状态，绝不会回显 API Key。保存或“重新读取并检测”会原子热更新模型池，新配置会立即出现在检测模型和新建题目下拉框中，运行中题目仍保留原连接和短期 Token，无需重启 daemon/桌面程序。
-
-已保存模型可通过右键菜单删除。删除操作需要模态确认；后端会独立检查所有未结束题目，如果仍有题目使用该模型则返回冲突并保留配置。删除 `.env` 中的模型同时会移除对应 API Key，因此该操作不可撤销。
-
 ### 构建专项镜像
 
 windows下下载docker desktop
@@ -127,22 +116,6 @@ bin/
 
 GUI 启动时会优先连接已有 daemon；未检测到可用实例时，会自动启动同目录的 `ctfagent-daemon.exe`。
 
-## 模型网关配置
-
-| 环境变量 | 必填 | 默认值 | 作用 |
-|---|---:|---|---|
-| `CTF_UPSTREAM_MODEL_BASE_URL` | 是 | — | OpenAI-compatible API 基础地址 |
-| `CTF_UPSTREAM_MODEL_API_KEY` | 是 | — | 真实上游 API Key，仅 daemon 持有 |
-| `CTF_MODEL_ID` | 是 | — | Agent 使用的模型 ID |
-| `CTF_MODEL_INCLUDE_STREAM_USAGE` | 否 | `true` | 为流式请求加入 `stream_options.include_usage` |
-| `CTF_MODEL_SUPPORTS_IMAGES` | 否 | `false` | 仅在上游明确兼容 OpenAI `image_url` 内容块时设为 `true`；DeepSeek 应保持 `false` |
-| `CTF_AGENT_ENV_FILE` | 否 | 程序同目录 `.env` | 显式指定 daemon 配置文件 |
-| `CTF_AGENT_DATA_DIR` | 否 | 程序同目录 `data/` | 覆盖 SQLite、日志和工作区目录 |
-| `CTF_DAEMON_ADDRESS` | 否 | `127.0.0.1:18731` | daemon 监听地址 |
-| `CTF_DAEMON_TOKEN` | 否 | 自动安全生成 | 覆盖本地控制平面 Token |
-| `CTF_DAEMON_EXECUTABLE` | 否 | 自动查找 | GUI 启动的 daemon 路径 |
-| `DOCKER_HOST` | 否 | Docker SDK 默认 | 指定 Docker Engine |
-
 daemon 会为每次任务启动签发随机短期 Token。容器通过：
 
 ```text
@@ -150,26 +123,6 @@ http://host.docker.internal:<daemon-port>/model
 ```
 
 访问本地模型网关。SQLite 用量账本只保存模型名、Token 数、状态码和耗时，不保存 Prompt、回复、请求头或真实 Key。
-
-## 沙箱与安全模型
-
-| 控制项 | 当前策略 |
-|---|---|
-| 默认内存 | 4 GiB |
-| 默认 CPU | 4 核配额 |
-| 默认 PID | 512 |
-| Linux capabilities | 默认全部移除 |
-| Pwn 额外能力 | `SYS_PTRACE` |
-| `no-new-privileges` | 启用 |
-| Docker Socket | 不挂载 |
-| 宿主机目录 | 只挂载当前题目工作区 |
-| 模型凭据 | 容器只获得任务级短期 Token |
-| 普通题运行时 | 优先 gVisor，开发环境可降级 runc |
-| Pwn 运行时 | 优先 Kata，开发环境可降级 runc |
-
-> [!WARNING]
-> 当前实现仍使用 Docker bridge 网络，尚未在网络层强制目标白名单。  
-> `runc` 降级模式只适合本地开发和可信题目；不要把它视为针对恶意二进制的强隔离边界。
 
 ## 题型与专项镜像
 
@@ -182,10 +135,11 @@ http://host.docker.internal:<daemon-port>/model
 | Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility | gVisor/Kata |
 | Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy | gVisor |
 
-镜像详细说明见 [`images/README.md`](./images/README.md)。
-
 ## 最后
 
-**1.3.1为最新版，因研究agent没有时间，此后一段时间不再更新/修复bug，优化agent的版本将第一时间在交流群和公众号发布说明。**
+**CTF-BTFly是一个开源项目，这其中很多代码都是ai编写的，我只负责了构建框架和ui设计。
+虽然是ai项目，但我一直觉得开源精神是互联网最伟大的精神，这个项目从今年4月份跟朋友开始构思，5月份初版做出来，后面进行了很多测试，效果不错，放了暑假我在初版的基础上更换了ui和后端agent，也重新设计了一下架构，本来没有准备放出来，但是效果确实不错，ui、解题速度、安全性都很可以，所以我开源在了github，只是希望能跟更多的大佬交流agent，同时也想有一个高star的项目(谁不想要一个高star的项目呢，在此感谢各位关注/点star的师傅，还有pi,gpt,ds)。
+在开源的这个期间呢，我感受到了开源作者的一些痛苦，要面对很多问题，有一些问题我都无法诉说，更甚至的呢还要被说“招笑”，我也不知道这个项目好笑在哪里😂，可能是agent不是自己写的用的pi，可能项目代码是ai写的，我只负责了框架，基于以上呢，我决定不在github上放出来了，1.3.1版本也已经非常好用了，可以实现一定的自动化了。后面优化agent的也不开放了，毕竟是开源的，想要什么功能自己可以做，想弄的尽量早点存代码，我要删除了，群里也不再解决问题了。
+最后：🙏🏻🙏🏻🙏🏻**
 
 欢迎交流agent:921416626
