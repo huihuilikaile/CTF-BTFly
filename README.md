@@ -16,6 +16,8 @@ CTF-BTFly 将 GUI 与高权限控制平面分离：
 - **Pi RPC Agent**在容器内自主分析附件、执行命令、编写脚本并生成中文 `WRITEUP.md`；
 - **本地模型网关**把题目级短期 Token 替换为真实上游 Key，真实密钥不会进入容器或前端。
 
+因为一些原因1.3.1以后不再开源，具体可以看最后，2.0及以后版本的需要一定门槛进群获取，请谅解🙇‍。
+
 ## 图文说明与更新记录
 
 **使用时需要启动docker desktop，配置镜像文件(下文有教程)，配置env文件(模型baseurl+key+id等信息),打开右上角显示绿色提示灯,模型连接正常，即可开始使用。**
@@ -114,6 +116,40 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 | Reverse | `ctf-agent-pi-reverse:0.1.0` | Apktool、angr、GDB、Strace、Ltrace |
 | Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility |
 | Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy |
+
+## **赞助**
+
+**感谢以下师傅对工具的认可，我会持续努力的更新！！！**
+
+如有未统计上的师傅记得联系我🫡
+
+
+
+**枫 **
+
+**二月犬 **
+
+**Skywalker **
+
+**ShyL0ck **
+
+**Archie_x **
+
+**hqn **
+
+**Douze **
+
+**馬一强 **
+
+**御风 **
+
+**Albert**
+
+**L*o**
+
+
+
+如果你对工具或者agent感兴趣可以进群交流:921416626
 
 ## 最后
 
