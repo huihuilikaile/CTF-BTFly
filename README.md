@@ -131,7 +131,7 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 ## 致谢 Acknowledgments
 ### 1. 项目贡献者 Contributors
 感谢以下开发者为本项目提交代码、修复Bug、完善文档、提供建议：
-- [@张三](https://github.com/zhangsan)：核心代码开发、功能迭代
+- [@dlongx](https://github.com/dlongx)：完善文档、提供建议
 
 ## 最后
 
