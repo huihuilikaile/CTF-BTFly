@@ -1,4 +1,17 @@
-#                              CTF-BTFLY: CTF agent 自动化解题工具
+<div align="center">
+  <img src="./template/cpi-icon.png" width="96" alt="CTF-BTFly Logo" />
+  <h1>CTF-BTFly</h1>
+  <p><strong>基于 pi agent的Windows 智能体 CTF 解题工作台</strong></p>
+  <p>将模型编排、终端、工具、证据与人工复核集中到一张本地工作台中。</p>
+  <p>
+    <img src="https://img.shields.io/badge/Version-2.7.2-38BDF8" alt="Version 2.7.2" />
+    <img src="https://img.shields.io/badge/Windows-AppContainer-0078D4?logo=windows&amp;logoColor=white" alt="Windows AppContainer" />
+    <img src="https://img.shields.io/badge/Wails-v3-EA4AAA" alt="Wails v3" />
+    <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&amp;logoColor=111827" alt="React 19" />
+    <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&amp;logoColor=white" alt="Go 1.26" />
+  </p>
+</div>
+
 
 
 
@@ -8,65 +21,60 @@
 
 ## 项目简介
 
-CTF-BTFly 将 GUI 与高权限控制平面分离：
+CTF-BTFly 将桌面工作台与高权限控制平面分离：
 
-- **Wails + React 桌面端**负责题目管理、状态展示、事件时间线、文件预览、Writeup 和模型用量；
-- **独立 Go daemon**负责 SQLite、Docker、任务状态机、模型凭据和 Agent 生命周期；
-- **每题一个 Docker 沙箱**，根据题型加载 Web、Crypto、Pwn、Reverse、Forensics 或 Misc 专项工具；
-- **Pi RPC Agent**在容器内自主分析附件、执行命令、编写脚本并生成中文 `WRITEUP.md`；
-- **本地模型网关**把题目级短期 Token 替换为真实上游 Key，真实密钥不会进入容器或前端。
+- 🪟 **Wails + React 桌面端**负责题目管理、实时状态、事件时间线、终端转录、文件预览、Flag 审核、Writeup 和模型用量；
+- ⚙️ **独立 Go daemon**负责 SQLite、Windows AppContainer、任务状态机、模型配置、资源配额和 Agent 生命周期；
+- 🛡️ **每题一个 Windows 原生沙箱**，使用 AppContainer、Job Object、NTFS ACL 与受控 Named Pipe 隔离工作区、进程和资源；
+- 🧠 **四种协作模式**覆盖标准模式、黑板模式、超级模式和多问题模式，按题目复杂度组织单模型或多模型协作；
+- 🧰 **三层工具接入**包括只读 Tool Pack、任务与实例级绑定的 MCP Server，以及经明确配置的 Host Tool；
+- 🚩 **Flag 主动上报与人工审核**允许 Agent 基于证据提交候选，确认后再进入 Writeup 阶段；
+- 📊 **本地优先与可追溯**：任务状态、证据、用量和审计记录保存在本机 SQLite，敏感工作区不上传到第三方；
+- 🎨 **15+ 套主题**覆盖深色、浅色、亮色与渐变配色，并支持字体、密度、背景和自定义强调色。
 
-因为一些原因1.3.1以后不再开源，具体可以看最后，2.0及以后版本的需要一定门槛进群获取，请谅解🙇‍。
+## 图文说明
 
-## 图文说明与更新记录
+展示的是2.7.1版本已经不开源了(具体原因可以看最后)，1.3.1开源，本项目代码2626/08已经删除了，可以去fork的找。
 
-**使用时需要启动docker desktop，配置镜像文件(下文有教程)，配置env文件(模型baseurl+key+id等信息),打开右上角显示绿色提示灯,模型连接正常，即可开始使用。**
+![CTF-BTFly 2.7.2 最新主工作台（已脱敏）](./template/latest-main-redacted.png)
 
-![image-20260802170230450](/template/image-1.png)
+**系统概况集中显示本地控制平面、Windows 沙箱、资源状态和模型连接。**
 
-**docker镜像可以一键导入(2.0新增)**
+![系统概况与 AppContainer 状态（模型地址已打码）](./template/latest-system-redacted.png)
 
-![image-20260804202707879](/template/12.png)
+**新建题目时填写题目信息、授权目标和 Flag 格式，并选择模型、解题架构与 Tool Pack。**
 
-**拖动题目附件到对应的区域会启动创建题目窗口**
+![新建题目（模型与工具包标识已打码）](./template/latest-create-redacted.png)
 
-![image-20260802170718611](/template/image-2.png)
+**进入超级模式前会检查当前任务和 Agent 状态，避免与已有运行任务争抢调度资源。**
 
-**填入题目信息，选择已经配置的模型，web/pwn/...配置远程地址，flag格式默认是flag{...}**
+![超级模式启动确认](./template/latest-super-confirm-redacted.png)
 
-![image-20260802170822399](/template/image-3.png)
+**超级模式由主 Agent 负责规划和调度，专家 Worker 按需启动，适合复杂、多附件和多路线题目。**
 
-**2.0版本新增多模型协同模式 针对ctf难题可以选择此模式**
+![超级模式创建与模型编排（模型与工具包标识已打码）](./template/latest-super-create-redacted.png)
 
-![image-20260804202439143](/template/11.png)
+**Agent 发现高置信度 Flag 候选后会暂停扩展路线，等待操作员人工确认。**
 
-**题目创建好启动agent即可**
+**Tool Pack 以固定版本进入沙箱；本机 EXE、Python 和脚本可通过受控模板接入。**
 
-![image-20260802171115701](/template/image-4.png)
+![Tool Pack 工具管理（桌面通知已移除）](./template/latest-toolpacks-redacted.png)
 
-**提示词 可以在这里暂停增加新的提示**
+**MCP Server 可按题型、任务和具体服务器实例绑定，工具调用进入审计记录。**
 
-![image-20260802171232549](/template/image-5.png)
+![MCP 工具配置（本机路径、命令、端口与地址已打码）](./template/latest-mcp-redacted.png)
 
-**解题过程 显示ai执行的一系列操作和思考过程 右上角可以暂停和中止 显示解题时间**
+**模型用量按请求、题目和时间统计输入、输出、缓存与推理 Token。**
 
-![image-20260802171400156](/template/image-6.png)
+![模型用量统计（模型标识已打码）](./template/latest-usage-redacted.png)
 
-**终端和文件会显示工具执行的信息，产生的文件，文件允许下载**
+**外观设置支持界面密度、字体、背景、动态效果和自定义强调色。**
 
-![image-20260802171615345](/template/image-7.png)
+![外观与主题设置](./template/latest-appearance-redacted.png)
 
-**wp 解题成功后会自动编写wp 允许下载**
+**历史题目保留必要的归档信息；公开截图中的题目名称、任务 ID、Flag 和本机 WP 路径均已打码。**
 
-![image-20260802171904333](/template/image-9.png)
-
-**题目卡片可以删除题目 可以选择是否保存wp**
-
-![image-20260802172032323](/template/image-10.png)
-
-**允许自定义主题配色(2.0新增)**
-
-![image-20260804202849172](/template/13.png)
+![历史题目（敏感字段已打码）](./template/latest-history-redacted.png)
 
 每道题的默认工作区结构：
 
@@ -75,49 +83,9 @@ data/workspaces/task_xxx/
 ├── attachments/       用户上传的题目附件
 ├── artifacts/         Agent 保存的脚本、响应和证据
 ├── .pi-sessions/      Pi 会话数据
+├── .cpi/              平台协议、候选结果与协作状态
 └── WRITEUP.md         中文可复现解题报告
 ```
-
-### 配置模型网关
-
-在最终 `CTF-BTFly.exe` 所在目录创建 `.env`。开发构建默认产物位于 `bin/`，因此通常创建 `bin/.env`：
-
-```env
-CTF_UPSTREAM_MODEL_BASE_URL=https://your-openai-compatible-endpoint/v1
-CTF_UPSTREAM_MODEL_API_KEY=your-real-provider-key
-CTF_MODEL_ID=your-model-id
-CTF_MODEL_INCLUDE_STREAM_USAGE=true
-CTF_MODEL_SUPPORTS_IMAGES=false
-# 多模型（可选）：设置 CTF_MODELS 后会优先使用以下配置，旧单模型变量仍兼容。
-CTF_MODELS=deepseek,vision
-CTF_DEFAULT_MODEL=deepseek
-CTF_MODEL_DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-CTF_MODEL_DEEPSEEK_API_KEY=your-deepseek-key
-CTF_MODEL_DEEPSEEK_ID=deepseek-chat
-CTF_MODEL_DEEPSEEK_SUPPORTS_IMAGES=false
-CTF_MODEL_VISION_BASE_URL=https://your-vision-endpoint/v1
-CTF_MODEL_VISION_API_KEY=your-vision-key
-CTF_MODEL_VISION_ID=your-vision-model
-CTF_MODEL_VISION_SUPPORTS_IMAGES=true
-
-```
-
-### 专项镜像
-
-**进群可以下载构建好的: 921416626**
-
-## 题型与专项镜像
-
-| 题型 | 镜像 | 代表工具 |
-|---|---|---|
-| Web | `ctf-agent-pi-web:0.1.0` | Nmap、SQLMap、Gobuster、WhatWeb |
-| Crypto | `ctf-agent-pi-crypto:0.1.0` | John、gmpy2、PyCryptodome、SymPy、Z3 |
-| Pwn | `ctf-agent-pi-pwn:0.1.0` | GDB、QEMU、Pwntools、Ropper、Checksec |
-| Reverse | `ctf-agent-pi-reverse:0.1.0` | Apktool、angr、GDB、Strace、Ltrace |
-| Forensics | `ctf-agent-pi-forensics:0.1.0` | Binwalk、Tshark、Yara、Sleuth Kit、Volatility |
-| Misc | `ctf-agent-pi-misc:0.1.0` | FFmpeg、ImageMagick、Steghide、ZBar、SciPy |
-
-## **赞助**
 
 **感谢以下师傅对工具的认可，我会持续努力的更新！！！**
 
@@ -127,7 +95,7 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 
 ------
 
-如果你对工具或者agent感兴趣可以进群交流:921416626
+如果你对工具或者agent感兴趣可以进群交流:921416626(群满＋二群)
 ## 致谢 
 感谢以下开发者为本项目提交代码、修复Bug、完善文档、提供建议：
 - [@dlongx](https://github.com/dlongx)：完善文档、提供建议
@@ -139,4 +107,4 @@ CTF_MODEL_VISION_SUPPORTS_IMAGES=true
 在开源的这个期间呢，我感受到了开源作者的一些痛苦，要面对很多问题，有一些问题我都无法诉说，更甚至的呢还要被说“招笑”，我也不知道这个项目好笑在哪里😂，可能是agent不是自己写的用的pi，可能项目代码是ai写的，我只负责了框架，基于以上呢，我决定不在github上放出来了，1.3.1版本也已经非常好用了，可以实现一定的自动化了。后面优化agent的也不开放了，毕竟是开源的，想要什么功能自己可以做，想弄的尽量早点存代码，我要删除了，群里也不再解决问题了。
 最后：🙏🏻🙏🏻🙏🏻**
 
-**欢迎进群交流agent:921416626**
+**欢迎进群交流agent:921416626(群满＋二群)**
