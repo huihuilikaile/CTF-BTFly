@@ -34,6 +34,8 @@ CTF-BTFly 将桌面工作台与高权限控制平面分离：
 
 ## 图文说明
 
+**演示：**https://ctf-btfly-box.netlify.app
+
 展示的是2.7.1版本已经不开源了(具体原因可以看最后)，1.3.1开源，本项目代码2026/08已经删除了，可以去fork的找。
 
 ![CTF-BTFly 2.7.2 最新主工作台（已脱敏）](./template/latest-main-redacted.png)
